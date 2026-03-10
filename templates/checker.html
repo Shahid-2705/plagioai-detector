@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Checker — PlagioAI</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="app-page">
+
+    <nav class="navbar">
+        <a href="/" class="nav-logo">
+            <span class="logo-mark">◈</span>
+            <span>PlagioAI</span>
+        </a>
+        <div class="step-tracker">
+            <div class="step active" id="step-1">
+                <span class="step-num">1</span>
+                <span class="step-label">Upload</span>
+            </div>
+            <div class="step-line"></div>
+            <div class="step" id="step-2">
+                <span class="step-num">2</span>
+                <span class="step-label">Detect</span>
+            </div>
+            <div class="step-line"></div>
+            <div class="step" id="step-3">
+                <span class="step-num">3</span>
+                <span class="step-label">Rewrite</span>
+            </div>
+            <div class="step-line"></div>
+            <div class="step" id="step-4">
+                <span class="step-num">4</span>
+                <span class="step-label">Report</span>
+            </div>
+        </div>
+    </nav>
+
+    <main class="app-main">
+
+        <!-- ====== STEP 1: UPLOAD ====== -->
+        <section class="panel active" id="panel-upload">
+            <div class="panel-header">
+                <h2>Upload Your Document</h2>
+                <p>Supports PDF, DOCX, and TXT files up to 16MB</p>
+            </div>
+
+            <div class="upload-zone" id="upload-zone">
+                <input type="file" id="file-input" accept=".pdf,.docx,.txt" hidden>
+                <div class="upload-icon">↑</div>
+                <p class="upload-title">Drag & drop your file here</p>
+                <p class="upload-sub">or click to browse</p>
+                <div class="upload-types">
+                    <span>PDF</span>
+                    <span>DOCX</span>
+                    <span>TXT</span>
+                </div>
+            </div>
+
+            <div class="file-info hidden" id="file-info">
+                <div class="file-info-inner">
+                    <div class="file-icon">📄</div>
+                    <div class="file-details">
+                        <span class="file-name" id="file-name">document.pdf</span>
+                        <span class="file-meta" id="file-meta">0 words · 0 chars</span>
+                    </div>
+                    <button class="remove-btn" id="remove-file">✕</button>
+                </div>
+            </div>
+
+            <div class="text-preview-wrap hidden" id="text-preview-wrap">
+                <h3 class="section-label">Document Preview</h3>
+                <div class="text-preview" id="text-preview"></div>
+            </div>
+
+            <div class="manual-input-wrap">
+                <h3 class="section-label">— or paste text directly —</h3>
+                <textarea id="manual-text" class="manual-textarea" placeholder="Paste your document text here..."></textarea>
+            </div>
+
+            <button class="primary-btn" id="btn-detect" disabled>
+                <span>Check Plagiarism</span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </button>
+        </section>
+
+        <!-- ====== STEP 2: RESULTS ====== -->
+        <section class="panel hidden" id="panel-results">
+            <div class="panel-header">
+                <h2>Plagiarism Analysis</h2>
+                <p>Sentence-level similarity scores across three metrics</p>
+            </div>
+
+            <div class="score-board">
+                <div class="score-ring-wrap">
+                    <svg class="score-ring" viewBox="0 0 120 120">
+                        <circle class="ring-bg" cx="60" cy="60" r="52" />
+                        <circle class="ring-fg" id="score-ring" cx="60" cy="60" r="52" />
+                    </svg>
+                    <div class="score-center">
+                        <span class="score-pct" id="score-pct">0%</span>
+                        <span class="score-lbl">Plagiarism</span>
+                    </div>
+                </div>
+                <div class="score-breakdown">
+                    <div class="breakdown-item">
+                        <span class="bd-dot high"></span>
+                        <span class="bd-label">High Risk (≥70%)</span>
+                        <span class="bd-count" id="count-high">0</span>
+                    </div>
+                    <div class="breakdown-item">
+                        <span class="bd-dot medium"></span>
+                        <span class="bd-label">Medium Risk (40-70%)</span>
+                        <span class="bd-count" id="count-medium">0</span>
+                    </div>
+                    <div class="breakdown-item">
+                        <span class="bd-dot low"></span>
+                        <span class="bd-label">Low Risk (&lt;40%)</span>
+                        <span class="bd-count" id="count-low">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <h3 class="section-label">Sentence Details</h3>
+            <div class="sentence-list" id="sentence-list"></div>
+
+            <div class="action-row">
+                <button class="secondary-btn" id="btn-back-upload">← Back</button>
+                <button class="primary-btn" id="btn-rewrite">
+                    <span>Rewrite Content</span>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+                </button>
+            </div>
+        </section>
+
+        <!-- ====== STEP 3: REWRITTEN ====== -->
+        <section class="panel hidden" id="panel-rewritten">
+            <div class="panel-header">
+                <h2>Rewritten Content</h2>
+                <p>Sentences above 70% similarity have been paraphrased by AI</p>
+            </div>
+
+            <div class="score-compare">
+                <div class="compare-item">
+                    <span class="compare-label">Before</span>
+                    <span class="compare-score danger" id="compare-before">—</span>
+                </div>
+                <div class="compare-arrow">→</div>
+                <div class="compare-item">
+                    <span class="compare-label">After</span>
+                    <span class="compare-score success" id="compare-after">—</span>
+                </div>
+                <div class="compare-item">
+                    <span class="compare-label">Rewritten</span>
+                    <span class="compare-score neutral" id="compare-count">—</span>
+                </div>
+            </div>
+
+            <h3 class="section-label">Side-by-Side Comparison</h3>
+            <div class="rewrite-list" id="rewrite-list"></div>
+
+            <div class="action-row">
+                <button class="secondary-btn" id="btn-back-results">← Back</button>
+                <button class="primary-btn" id="btn-report">
+                    <span>Generate Report</span>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                </button>
+            </div>
+        </section>
+
+        <!-- ====== STEP 4: REPORT ====== -->
+        <section class="panel hidden" id="panel-report">
+            <div class="panel-header">
+                <h2>Download Report</h2>
+                <p>Export the full analysis and rewritten document</p>
+            </div>
+
+            <div class="report-options">
+                <div class="report-card" id="dl-pdf">
+                    <div class="report-icon">⬇ PDF</div>
+                    <h3>PDF Report</h3>
+                    <p>Complete analysis with highlighted sentences, scores, and rewritten content.</p>
+                    <button class="primary-btn small" onclick="downloadReport('pdf')">Download PDF</button>
+                </div>
+                <div class="report-card" id="dl-docx">
+                    <div class="report-icon">⬇ DOCX</div>
+                    <h3>Word Document</h3>
+                    <p>Editable DOCX with full side-by-side comparison and summary table.</p>
+                    <button class="primary-btn small" onclick="downloadReport('docx')">Download DOCX</button>
+                </div>
+            </div>
+
+            <div class="final-summary" id="final-summary"></div>
+
+            <div class="action-row center">
+                <button class="secondary-btn" onclick="location.reload()">Start New Analysis</button>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Loading overlay -->
+    <div class="loading-overlay hidden" id="loading-overlay">
+        <div class="loading-box">
+            <div class="spinner"></div>
+            <p class="loading-msg" id="loading-msg">Analysing...</p>
+        </div>
+    </div>
+
+    <!-- Toast notification -->
+    <div class="toast hidden" id="toast"></div>
+
+    <script src="/static/js/script.js"></script>
+</body>
+</html>

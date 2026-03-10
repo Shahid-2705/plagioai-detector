@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Plagiarism Detector & Rewriter</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="home-page">
+
+    <div class="grid-overlay"></div>
+
+    <nav class="navbar">
+        <div class="nav-logo">
+            <span class="logo-mark">◈</span>
+            <span>PlagioAI</span>
+        </div>
+        <a href="/checker" class="nav-cta">Launch App →</a>
+    </nav>
+
+    <main class="hero">
+        <div class="hero-badge">
+            <span class="badge-dot"></span>
+            Powered by Sentence Transformers + FLAN-T5
+        </div>
+
+        <h1 class="hero-title">
+            Detect.<br>
+            <span class="title-accent">Rewrite.</span><br>
+            <span class="title-muted">Deliver.</span>
+        </h1>
+
+        <p class="hero-subtitle">
+            Upload any document — PDF, DOCX, or TXT — and let our AI engine<br>
+            detect plagiarized passages and rewrite them instantly.
+        </p>
+
+        <a href="/checker" class="cta-button">
+            <span>Start Checking</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </a>
+
+        <div class="hero-stats">
+            <div class="stat">
+                <span class="stat-num">3</span>
+                <span class="stat-label">Similarity Metrics</span>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat">
+                <span class="stat-num">70%+</span>
+                <span class="stat-label">Auto-Rewrite Threshold</span>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat">
+                <span class="stat-num">PDF+DOCX</span>
+                <span class="stat-label">Report Export</span>
+            </div>
+        </div>
+    </main>
+
+    <section class="features">
+        <div class="feature-card">
+            <div class="feature-icon">⟲</div>
+            <h3>Semantic Analysis</h3>
+            <p>SentenceTransformer embeddings capture deep meaning similarity beyond surface word matching.</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon">⊞</div>
+            <h3>N-gram Matching</h3>
+            <p>Bigram and trigram overlap catches phrase-level copying with high precision.</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon">◎</div>
+            <h3>AI Rewriting</h3>
+            <p>FLAN-T5 paraphrases flagged sentences while preserving original meaning and intent.</p>
+        </div>
+    </section>
+
+</body>
+</html>
