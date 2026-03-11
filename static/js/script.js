@@ -1,59 +1,60 @@
-/* =============================================
-   PlagioAI — Main App Script
-   ============================================= */
-
 'use strict';
 
-// ── State ────────────────────────────────────
+/* ===========================================
+   PLAGIOAI — script.js
+   Full feature set:
+   - Drag & drop upload
+   - File remove
+   - Manual text paste
+   - 4-step panel navigation
+   - Score ring animation
+   - Sentence list rendering
+   - Rewrite side-by-side view
+   - Report summary + download
+   - Loading overlay & toast notifications
+   - credentials: 'include' on every fetch
+=========================================== */
+
+/* ── State ─────────────────────────────── */
+
 const state = {
-    text: '',
-    filename: '',
-    sentences: [],
+    text:             '',
+    filename:         '',
+    sentences:        [],
     detectionResults: null,
-    rewrittenData: null,
+    rewrittenData:    null
 };
 
-// ── Helpers ──────────────────────────────────
-const $ = (id) => document.getElementById(id);
-const qs = (sel) => document.querySelector(sel);
+/* ── DOM helper ─────────────────────────── */
 
-function showLoading(msg = 'Processing...') {
-    $('loading-msg').textContent = msg;
-    $('loading-overlay').classList.remove('hidden');
+const $ = (id) => document.getElementById(id);
+
+/* ── Loading overlay ────────────────────── */
+
+function showLoading(msg) {
+    const overlay = $('loading-overlay');
+    const label   = $('loading-msg');
+    if (overlay) overlay.classList.remove('hidden');
+    if (label)   label.textContent = msg || 'Processing…';
 }
 
 function hideLoading() {
-    $('loading-overlay').classList.add('hidden');
+    const overlay = $('loading-overlay');
+    if (overlay) overlay.classList.add('hidden');
 }
 
-function showToast(msg, type = '') {
+/* ── Toast notifications ────────────────── */
+
+function showToast(msg, type) {
     const t = $('toast');
+    if (!t) return;
     t.textContent = msg;
-    t.className = 'toast show ' + type;
-    setTimeout(() => { t.className = 'toast hidden'; }, 3500);
+    t.className   = 'toast show ' + (type || '');
+    clearTimeout(t._timer);
+    t._timer = setTimeout(function () { t.className = 'toast hidden'; }, 3500);
 }
 
-function activateStep(n) {
-    for (let i = 1; i <= 4; i++) {
-        const el = $(`step-${i}`);
-        if (!el) continue;
-        el.classList.remove('active', 'done');
-        if (i < n) el.classList.add('done');
-        if (i === n) el.classList.add('active');
-    }
-}
-
-function showPanel(name) {
-    document.querySelectorAll('.panel').forEach(p => {
-        p.classList.remove('active');
-        p.classList.add('hidden');
-    });
-    const target = $(`panel-${name}`);
-    if (target) {
-        target.classList.remove('hidden');
-        target.classList.add('active');
-    }
-}
+/* ── Risk helpers ───────────────────────── */
 
 function riskClass(score) {
     if (score >= 0.70) return 'high';
@@ -62,88 +63,127 @@ function riskClass(score) {
 }
 
 function pct(score) {
-    return Math.round(score * 100) + '%';
+    if (score == null) return '0%';
+    return (score <= 1 ? Math.round(score * 100) : Math.round(score)) + '%';
 }
 
-// ── Step navigation ──────────────────────────
-function goToDetect() {
-    showPanel('results');
-    activateStep(2);
-}
-function goToUpload() {
-    showPanel('upload');
-    activateStep(1);
-}
-function goToRewrite() {
-    showPanel('rewritten');
-    activateStep(3);
-}
-function goToResults() {
-    showPanel('results');
-    activateStep(2);
-}
-function goToReport() {
-    showPanel('report');
-    activateStep(4);
+function escapeHtml(str) {
+    var map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+    return String(str || '').replace(/[&<>"']/g, function (m) { return map[m]; });
 }
 
-// ── Upload zone ──────────────────────────────
+/* ── Step tracker ───────────────────────── */
+
+function activateStep(n) {
+    for (var i = 1; i <= 4; i++) {
+        var el = $('step-' + i);
+        if (!el) continue;
+        el.classList.remove('active', 'done');
+        if (i < n)  el.classList.add('done');
+        if (i === n) el.classList.add('active');
+    }
+}
+
+/* ── Panel navigation ───────────────────── */
+
+function showPanel(name) {
+    document.querySelectorAll('.panel').forEach(function (p) {
+        p.classList.remove('active');
+        p.classList.add('hidden');
+    });
+    var target = $('panel-' + name);
+    if (target) {
+        target.classList.remove('hidden');
+        target.classList.add('active');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+}
+
+/* ── Upload zone (drag & drop + click) ─── */
+
 function initUploadZone() {
-    const zone = $('upload-zone');
-    const input = $('file-input');
+    var zone  = $('upload-zone');
+    var input = $('file-input');
+    if (!zone || !input) return;
 
-    zone.addEventListener('click', () => input.click());
+    /* Click to open file picker */
+    zone.addEventListener('click', function () { input.click(); });
 
-    zone.addEventListener('dragover', (e) => {
+    /* Drag over */
+    zone.addEventListener('dragover', function (e) {
         e.preventDefault();
         zone.classList.add('drag-over');
     });
-    zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
-    zone.addEventListener('drop', (e) => {
+
+    /* Drag leave */
+    zone.addEventListener('dragleave', function (e) {
+        if (!zone.contains(e.relatedTarget)) {
+            zone.classList.remove('drag-over');
+        }
+    });
+
+    /* Drop */
+    zone.addEventListener('drop', function (e) {
         e.preventDefault();
         zone.classList.remove('drag-over');
-        const file = e.dataTransfer.files[0];
+        var file = e.dataTransfer.files[0];
         if (file) handleFileSelected(file);
     });
 
-    input.addEventListener('change', () => {
-        if (input.files[0]) handleFileSelected(input.files[0]);
+    /* Input change */
+    input.addEventListener('change', function () {
+        if (input.files.length > 0) handleFileSelected(input.files[0]);
     });
 
-    $('remove-file').addEventListener('click', resetFile);
+    /* Remove file button */
+    var removeBtn = $('remove-file');
+    if (removeBtn) removeBtn.addEventListener('click', resetFile);
 
-    // Manual text enables button
-    $('manual-text').addEventListener('input', () => {
-        const val = $('manual-text').value.trim();
-        if (val.length > 50) {
-            state.text = val;
-            state.filename = 'pasted-text.txt';
-            $('btn-detect').disabled = false;
-        } else {
-            if (!state.filename || state.filename === 'pasted-text.txt') {
+    /* Manual text area — enable detect button when enough text is pasted */
+    var manualArea = $('manual-text');
+    if (manualArea) {
+        manualArea.addEventListener('input', function () {
+            var val = manualArea.value.trim();
+            if (val.length > 50) {
+                state.text     = val;
+                state.filename = 'pasted-text.txt';
+                enableDetect(true);
+            } else if (!state.filename || state.filename === 'pasted-text.txt') {
                 state.text = '';
-                $('btn-detect').disabled = true;
+                enableDetect(false);
             }
-        }
-    });
+        });
+    }
 }
 
+function enableDetect(on) {
+    var btn = $('btn-detect');
+    if (btn) btn.disabled = !on;
+}
+
+/* ── File selected handler ──────────────── */
+
 async function handleFileSelected(file) {
-    const ext = file.name.split('.').pop().toLowerCase();
-    const allowedExts = ['pdf', 'docx', 'txt'];
-    if (!allowedExts.includes(ext)) {
+    var ext     = file.name.split('.').pop().toLowerCase();
+    var allowed = ['pdf', 'docx', 'txt'];
+
+    if (!allowed.includes(ext)) {
         showToast('Unsupported file type. Use PDF, DOCX, or TXT.', 'error');
         return;
     }
 
-    showLoading('Extracting text…');
+    showLoading('Extracting text from file…');
 
-    const formData = new FormData();
+    var formData = new FormData();
     formData.append('file', file);
 
     try {
-        const res = await fetch('/upload', { method: 'POST', body: formData, credentials: 'include' });
-        const data = await res.json();
+        var res  = await fetch('/upload', {
+            method: 'POST',
+            body:   formData,
+            credentials: 'include'
+        });
+        var data = await res.json();
         hideLoading();
 
         if (!res.ok || data.error) {
@@ -151,48 +191,76 @@ async function handleFileSelected(file) {
             return;
         }
 
-        state.text = data.full_text || data.preview;   // backend now sends full_text
-        state.filename = data.filename;
+        /* Store the FULL text so /detect receives the complete document */
+        state.text     = data.full_text || data.preview || '';
+        state.filename = data.filename  || file.name;
 
-        $('file-name').textContent = data.filename;
-        $('file-meta').textContent = `${data.word_count.toLocaleString()} words · ${data.char_count.toLocaleString()} chars`;
-        $('file-info').classList.remove('hidden');
-        $('text-preview').textContent = data.preview;
-        $('text-preview-wrap').classList.remove('hidden');
-        $('btn-detect').disabled = false;
+        /* Update UI */
+        var nameEl = $('file-name');
+        var metaEl = $('file-meta');
+        var infoEl = $('file-info');
+        var prevEl = $('text-preview');
+        var prevWr = $('text-preview-wrap');
 
+        if (nameEl) nameEl.textContent = data.filename;
+        if (metaEl) metaEl.textContent =
+            (data.word_count || 0).toLocaleString() + ' words · ' +
+            (data.char_count || 0).toLocaleString() + ' chars';
+        if (infoEl) infoEl.classList.remove('hidden');
+        if (prevEl) prevEl.textContent = data.preview || '';
+        if (prevWr) prevWr.classList.remove('hidden');
+
+        enableDetect(true);
         showToast('File uploaded successfully!', 'success');
+
     } catch (err) {
         hideLoading();
         showToast('Upload error: ' + err.message, 'error');
     }
 }
 
+/* ── Reset file ─────────────────────────── */
+
 function resetFile() {
-    state.text = '';
+    state.text     = '';
     state.filename = '';
-    $('file-input').value = '';
-    $('file-info').classList.add('hidden');
-    $('text-preview-wrap').classList.add('hidden');
-    $('btn-detect').disabled = true;
-    $('manual-text').value = '';
+
+    var input = $('file-input');
+    if (input) input.value = '';
+
+    ['file-info', 'text-preview-wrap'].forEach(function (id) {
+        var el = $(id);
+        if (el) el.classList.add('hidden');
+    });
+
+    var manual = $('manual-text');
+    if (manual) manual.value = '';
+
+    enableDetect(false);
 }
 
-// ── Detection ────────────────────────────────
+/* ── Detection ──────────────────────────── */
+
 async function runDetection() {
-    const text = state.text || $('manual-text').value.trim();
-    if (!text) { showToast('Please upload or paste text first.', 'error'); return; }
+    var manualEl = $('manual-text');
+    var manual   = manualEl ? manualEl.value.trim() : '';
+    var text     = state.text || manual;
+
+    if (!text) {
+        showToast('Upload a file or paste text first.', 'error');
+        return;
+    }
 
     showLoading('Analysing plagiarism… this may take a moment.');
 
     try {
-        const res = await fetch('/detect', {
-            method: 'POST',
+        var res  = await fetch('/detect', {
+            method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
-            body: JSON.stringify({ text }),
+            body:    JSON.stringify({ text: text })
         });
-        const data = await res.json();
+        var data = await res.json();
         hideLoading();
 
         if (!res.ok || data.error) {
@@ -200,10 +268,12 @@ async function runDetection() {
             return;
         }
 
-        state.sentences = data.sentences;
+        state.sentences        = data.sentences || [];
         state.detectionResults = data;
+
         renderResults(data);
-        goToDetect();
+        showPanel('results');
+        activateStep(2);
 
     } catch (err) {
         hideLoading();
@@ -211,68 +281,114 @@ async function runDetection() {
     }
 }
 
+/* ── Render detection results ───────────── */
+
 function renderResults(data) {
-    const score = data.overall_score;
-    const pctVal = Math.round(score);
+    var score = data.overall_score || 0;
 
-    // Animate score ring
-    $('score-pct').textContent = pctVal + '%';
-    const ring = $('score-ring');
-    const circumference = 326.73;
-    const offset = circumference - (score / 100) * circumference;
-    ring.style.strokeDashoffset = offset;
+    /* Score percentage label */
+    var pctEl = $('score-pct');
+    if (pctEl) pctEl.textContent = Math.round(score) + '%';
 
-    // Color ring based on score
-    if (score >= 70) ring.style.stroke = 'var(--high)';
-    else if (score >= 40) ring.style.stroke = 'var(--medium)';
-    else ring.style.stroke = 'var(--low)';
+    /* Animate SVG score ring */
+    animateRing(score);
 
-    $('count-high').textContent   = data.high_risk_count;
-    $('count-medium').textContent = data.medium_risk_count;
-    $('count-low').textContent    = data.sentences.length - data.high_risk_count - data.medium_risk_count;
+    /* Risk counters */
+    var highEl   = $('count-high');
+    var mediumEl = $('count-medium');
+    var lowEl    = $('count-low');
+    var totalSentences = (data.sentences || []).length;
+    var highCount      = data.high_risk_count   || 0;
+    var mediumCount    = data.medium_risk_count || 0;
 
-    // Sentence list
-    const list = $('sentence-list');
+    if (highEl)   highEl.textContent   = highCount;
+    if (mediumEl) mediumEl.textContent = mediumCount;
+    if (lowEl)    lowEl.textContent    = totalSentences - highCount - mediumCount;
+
+    /* Sentence list */
+    var list = $('sentence-list');
+    if (!list) return;
     list.innerHTML = '';
-    data.results.forEach((s, i) => {
-        const risk = riskClass(s.combined_score);
-        const div = document.createElement('div');
-        div.className = `sentence-item ${risk}`;
-        div.innerHTML = `
-            <span class="s-index">#${i + 1}</span>
-            <div class="s-content">
-                <p class="s-text">${escapeHtml(s.sentence)}</p>
-                <div class="s-metrics">
-                    <span class="s-metric">Semantic: ${pct(s.semantic_score)}</span>
-                    <span class="s-metric">N-gram: ${pct(s.ngram_score)}</span>
-                    <span class="s-metric">Jaccard: ${pct(s.jaccard_score)}</span>
-                </div>
-            </div>
-            <span class="s-score ${risk}">${pct(s.combined_score)}</span>
-        `;
+
+    /* Backend returns sentence scores under key "results" */
+    var scores    = data.results || data.sentence_scores || [];
+    var sentences = data.sentences || [];
+
+    scores.forEach(function (s, i) {
+        var sentence = sentences[i] || s.sentence || '';
+        var combined = s.combined_score || 0;
+        var risk     = riskClass(combined);
+
+        var div = document.createElement('div');
+        div.className = 'sentence-item ' + risk;
+
+        div.innerHTML =
+            '<span class="s-index">#' + (i + 1) + '</span>' +
+            '<div class="s-content">' +
+                '<p class="s-text">' + escapeHtml(sentence) + '</p>' +
+                '<div class="s-metrics">' +
+                    '<span class="s-metric">Semantic: ' + pct(s.semantic_score) + '</span>' +
+                    '<span class="s-metric">N-gram: '   + pct(s.ngram_score)    + '</span>' +
+                    '<span class="s-metric">Jaccard: '  + pct(s.jaccard_score)  + '</span>' +
+                '</div>' +
+            '</div>' +
+            '<span class="s-score ' + risk + '">' + pct(combined) + '</span>';
+
         list.appendChild(div);
     });
 }
 
-// ── Rewriting ────────────────────────────────
+/* ── Score ring animation ───────────────── */
+
+function animateRing(score) {
+    var ring = $('score-ring');
+    if (!ring) return;
+
+    var circumference = 326.73;           /* 2π × r=52 */
+    var targetOffset  = circumference - (Math.min(score, 100) / 100) * circumference;
+
+    /* Colour by severity */
+    if (score >= 70)      ring.style.stroke = 'var(--high)';
+    else if (score >= 40) ring.style.stroke = 'var(--medium)';
+    else                  ring.style.stroke = 'var(--low)';
+
+    /* Start from full offset (empty ring) then animate to target */
+    ring.style.transition = 'none';
+    ring.style.strokeDashoffset = circumference;
+
+    /* Force reflow so the transition actually plays */
+    ring.getBoundingClientRect();
+
+    ring.style.transition       = 'stroke-dashoffset 1.2s cubic-bezier(0.4, 0, 0.2, 1)';
+    ring.style.strokeDashoffset = targetOffset;
+}
+
+/* ── Rewrite ────────────────────────────── */
+
 async function runRewrite() {
+    if (!state.detectionResults) {
+        showToast('Run detection first.', 'error');
+        return;
+    }
+
     showLoading('Rewriting high-risk sentences with AI… please wait.');
 
     try {
-        const res = await fetch('/rewrite', {
-            method: 'POST',
+        var res  = await fetch('/rewrite', {
+            method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
             body: JSON.stringify({
                 sentences: state.sentences,
                 results: {
-                    sentence_scores: state.detectionResults ? state.detectionResults.results : [],
-                    overall_score: state.detectionResults ? state.detectionResults.overall_score : 0,
+                    sentence_scores: state.detectionResults.results ||
+                                     state.detectionResults.sentence_scores || [],
+                    overall_score:   state.detectionResults.overall_score   || 0
                 },
-                threshold: 0.70,
-            }),
+                threshold: 0.30
+            })
         });
-        const data = await res.json();
+        var data = await res.json();
         hideLoading();
 
         if (!res.ok || data.error) {
@@ -282,7 +398,8 @@ async function runRewrite() {
 
         state.rewrittenData = data;
         renderRewritten(data);
-        goToRewrite();
+        showPanel('rewritten');
+        activateStep(3);
 
     } catch (err) {
         hideLoading();
@@ -290,111 +407,150 @@ async function runRewrite() {
     }
 }
 
-function renderRewritten(data) {
-    $('compare-before').textContent = Math.round(data.original_score) + '%';
-    $('compare-after').textContent  = Math.round(data.new_score) + '%';
-    $('compare-count').textContent  = data.rewritten_count + ' sentences';
+/* ── Render rewritten content ───────────── */
 
-    const list = $('rewrite-list');
+function renderRewritten(data) {
+    /* Score comparison bar
+       original_score comes from the detection overall_score stored server-side.
+       If it arrives as 0, fall back to the value saved in state. */
+    var origScore = data.original_score ||
+                    (state.detectionResults ? state.detectionResults.overall_score : 0) || 0;
+    var newScore  = data.new_score || 0;
+    var rwCount   = data.rewritten_count || 0;
+
+    var before = $('compare-before');
+    var after  = $('compare-after');
+    var count  = $('compare-count');
+    if (before) before.textContent = Math.round(origScore) + '%';
+    if (after)  after.textContent  = Math.round(newScore)  + '%';
+    if (count)  count.textContent  = rwCount + ' sentences';
+
+    /* Side-by-side list */
+    var list = $('rewrite-list');
+    if (!list) return;
     list.innerHTML = '';
 
-    data.rewritten_sentences.forEach((s, i) => {
-        const div = document.createElement('div');
+    (data.rewritten_sentences || []).forEach(function (s, i) {
+        var tagClass = s.was_rewritten ? 'rewritten' : 'unchanged';
+        var tagLabel = s.was_rewritten ? '&#9998; Rewritten' : '&mdash; Unchanged';
+
+        var div       = document.createElement('div');
         div.className = 'rewrite-item' + (s.was_rewritten ? ' changed' : '');
-        div.innerHTML = `
-            <div class="rewrite-header">
-                <span>Sentence ${i + 1} · Original score: ${Math.round(s.original_score * 100)}%</span>
-                <span class="rewrite-tag ${s.was_rewritten ? 'rewritten' : 'unchanged'}">
-                    ${s.was_rewritten ? '✎ Rewritten' : '— Unchanged'}
-                </span>
-            </div>
-            <div class="rewrite-body">
-                <div class="rewrite-row">
-                    <span class="rewrite-row-label">Original</span>
-                    <p class="rewrite-row-text original">${escapeHtml(s.original)}</p>
-                </div>
-                ${s.was_rewritten ? `
-                <div class="rewrite-row">
-                    <span class="rewrite-row-label">Rewritten</span>
-                    <p class="rewrite-row-text rewritten-text">${escapeHtml(s.rewritten)}</p>
-                </div>` : ''}
-            </div>
-        `;
+
+        var rewrittenRow = s.was_rewritten
+            ? '<div class="rewrite-row">' +
+                  '<span class="rewrite-row-label">Rewritten</span>' +
+                  '<p class="rewrite-row-text rewritten-text">' + escapeHtml(s.rewritten) + '</p>' +
+              '</div>'
+            : '';
+
+        div.innerHTML =
+            '<div class="rewrite-header">' +
+                '<span>Sentence ' + (i + 1) + ' &middot; ' +
+                    'Original score: ' + Math.round((s.original_score || 0) * 100) + '%</span>' +
+                '<span class="rewrite-tag ' + tagClass + '">' + tagLabel + '</span>' +
+            '</div>' +
+            '<div class="rewrite-body">' +
+                '<div class="rewrite-row">' +
+                    '<span class="rewrite-row-label">Original</span>' +
+                    '<p class="rewrite-row-text original">' + escapeHtml(s.original) + '</p>' +
+                '</div>' +
+                rewrittenRow +
+            '</div>';
+
         list.appendChild(div);
     });
 }
 
-// ── Report ───────────────────────────────────
+/* ── Report ─────────────────────────────── */
+
 function renderReportSummary() {
-    const d = state.rewrittenData;
+    var d  = state.rewrittenData;
     if (!d) return;
-    const reduction = d.original_score - d.new_score;
-    $('final-summary').textContent =
-        `Original Plagiarism Score:  ${Math.round(d.original_score)}%\n` +
-        `New Plagiarism Score:        ${Math.round(d.new_score)}%\n` +
-        `Score Reduction:             ${reduction >= 0 ? '-' : '+'}${Math.abs(Math.round(reduction))}%\n` +
-        `Sentences Rewritten:         ${d.rewritten_count}\n` +
-        `Total Sentences Analysed:    ${d.rewritten_sentences.length}`;
+    var el = $('final-summary');
+    if (!el) return;
+
+    var reduction = (d.original_score || 0) - (d.new_score || 0);
+    el.textContent =
+        'Original Plagiarism Score:   ' + Math.round(d.original_score || 0) + '%\n' +
+        'New Plagiarism Score:         ' + Math.round(d.new_score      || 0) + '%\n' +
+        'Score Reduction:              ' + (reduction >= 0 ? '-' : '+') +
+                                           Math.abs(Math.round(reduction)) + '%\n' +
+        'Sentences Rewritten:          ' + (d.rewritten_count || 0) + '\n' +
+        'Total Sentences Analysed:     ' + (d.rewritten_sentences || []).length;
 }
 
 async function downloadReport(format) {
     showLoading('Generating ' + format.toUpperCase() + ' report…');
+
     try {
-        const d = state.rewrittenData;
-        const res = await fetch('/report', {
-            method: 'POST',
+        var d   = state.rewrittenData || {};
+        var res = await fetch('/report', {
+            method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
-            body: JSON.stringify({
-                format,
-                original_score: d ? d.original_score : 0,
-            }),
+            body: JSON.stringify({ format: format, original_score: d.original_score || 0 })
         });
         hideLoading();
+
         if (!res.ok) {
-            const err = await res.json();
+            var err = await res.json().catch(function () { return {}; });
             showToast(err.error || 'Report generation failed', 'error');
             return;
         }
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `plagiarism_report.${format}`;
+
+        var blob = await res.blob();
+        var url  = URL.createObjectURL(blob);
+        var a    = document.createElement('a');
+        a.href     = url;
+        a.download = 'plagiarism_report.' + format;
+        document.body.appendChild(a);
         a.click();
+        document.body.removeChild(a);
         URL.revokeObjectURL(url);
+
         showToast('Report downloaded!', 'success');
+
     } catch (err) {
         hideLoading();
         showToast('Download error: ' + err.message, 'error');
     }
 }
 
-// ── Escape HTML ──────────────────────────────
-function escapeHtml(str) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(str).replace(/[&<>"']/g, m => map[m]);
-}
+/* ── Initialise ─────────────────────────── */
 
-// ── Wire up buttons ──────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', function () {
+
+    /* Upload zone (drag-drop, file picker, manual textarea) */
     initUploadZone();
 
-    const btnDetect = $('btn-detect');
+    /* Step 1 → 2: Detect */
+    var btnDetect = $('btn-detect');
     if (btnDetect) btnDetect.addEventListener('click', runDetection);
 
-    const btnRewrite = $('btn-rewrite');
+    /* Step 2 → 3: Rewrite */
+    var btnRewrite = $('btn-rewrite');
     if (btnRewrite) btnRewrite.addEventListener('click', runRewrite);
 
-    const btnReport = $('btn-report');
-    if (btnReport) btnReport.addEventListener('click', () => {
+    /* Step 3 → 4: Report */
+    var btnReport = $('btn-report');
+    if (btnReport) btnReport.addEventListener('click', function () {
         renderReportSummary();
-        goToReport();
+        showPanel('report');
+        activateStep(4);
     });
 
-    const btnBackUpload  = $('btn-back-upload');
-    if (btnBackUpload)  btnBackUpload.addEventListener('click', goToUpload);
+    /* Back: results → upload */
+    var btnBackUpload = $('btn-back-upload');
+    if (btnBackUpload) btnBackUpload.addEventListener('click', function () {
+        showPanel('upload');
+        activateStep(1);
+    });
 
-    const btnBackResults = $('btn-back-results');
-    if (btnBackResults) btnBackResults.addEventListener('click', goToResults);
+    /* Back: rewritten → results */
+    var btnBackResults = $('btn-back-results');
+    if (btnBackResults) btnBackResults.addEventListener('click', function () {
+        showPanel('results');
+        activateStep(2);
+    });
 });
