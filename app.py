@@ -1,13 +1,18 @@
 """
 AI Plagiarism Detector & Rewriter - Flask Application
 
-Fixes applied:
-  1. Server-side file system sessions (flask-session) — no more 4 KB cookie limit
-  2. Flask reloader exclude_patterns — stops watching site-packages/torch/transformers
+Performance fixes:
+  - Models pre-loaded in a background thread at startup
+  - /status endpoint so the UI can show real loading progress
+  - Server-side sessions (flask-session) — no 4 KB cookie limit
+  - Reloader excludes site-packages to prevent infinite restarts
 """
 
 import os
 import uuid
+import warnings
+warnings.filterwarnings('ignore', message='.*sequentially on GPU.*', category=UserWarning)
+import threading
 from flask import Flask, render_template, request, jsonify, send_file, session
 from flask_cors import CORS
 from flask_session import Session
@@ -18,12 +23,11 @@ from core.plagiarism_detector import PlagiarismDetector
 from core.rewrite_engine import RewriteEngine
 from core.report_generator import generate_report
 
-# ── App setup ─────────────────────────────────────────────────────────────────
+# ── App setup ──────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
-# ── Server-side session (filesystem) — bypasses the 4 KB cookie limit ─────────
 SESSION_DIR = os.path.join(os.path.dirname(__file__), 'flask_sessions')
 os.makedirs(SESSION_DIR, exist_ok=True)
 
@@ -35,41 +39,89 @@ app.config.update(
     SESSION_COOKIE_SAMESITE = 'Lax',
     SESSION_COOKIE_SECURE   = False,
     UPLOAD_FOLDER           = os.path.join(os.path.dirname(__file__), 'uploads'),
-    MAX_CONTENT_LENGTH      = 16 * 1024 * 1024,   # 16 MB
+    MAX_CONTENT_LENGTH      = 16 * 1024 * 1024,
 )
 
-Session(app)   # initialise flask-session AFTER config
+Session(app)
 CORS(app, supports_credentials=True)
-
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 ALLOWED_EXTENSIONS = {'pdf', 'docx', 'txt'}
 
-# ── Lazy-loaded ML engines ────────────────────────────────────────────────────
+# ── Model state (shared across threads) ───────────────────────────────────────
 
-_detector = None
-_rewriter = None
+_models = {
+    'detector':        None,
+    'rewriter':        None,
+    'detector_ready':  False,
+    'rewriter_ready':  False,
+    'detector_status': 'loading',   # loading | ready | error
+    'rewriter_status': 'loading',
+    'detector_error':  '',
+    'rewriter_error':  '',
+}
+_lock = threading.Lock()
+
+
+def _load_detector():
+    try:
+        with _lock:
+            _models['detector_status'] = 'loading'
+        d = PlagiarismDetector()
+        # Warm up: encode a dummy sentence so the model weights are in memory
+        d.engine.compute_embeddings(['warmup sentence'])
+        with _lock:
+            _models['detector']        = d
+            _models['detector_ready']  = True
+            _models['detector_status'] = 'ready'
+        print('[PlagioAI] ✓ Detector ready')
+    except Exception as e:
+        with _lock:
+            _models['detector_status'] = 'error'
+            _models['detector_error']  = str(e)
+        print(f'[PlagioAI] ✗ Detector failed: {e}')
+
+
+def _load_rewriter():
+    try:
+        with _lock:
+            _models['rewriter_status'] = 'loading'
+        r = RewriteEngine()
+        # Warm up: paraphrase a short sentence
+        r.rewrite('This is a warm-up sentence.')
+        with _lock:
+            _models['rewriter']        = r
+            _models['rewriter_ready']  = True
+            _models['rewriter_status'] = 'ready'
+        print('[PlagioAI] ✓ Rewriter ready')
+    except Exception as e:
+        with _lock:
+            _models['rewriter_status'] = 'error'
+            _models['rewriter_error']  = str(e)
+        print(f'[PlagioAI] ✗ Rewriter failed: {e}')
+
+
+# Start loading both models in background threads immediately at import time
+print('[PlagioAI] Loading models in background…')
+threading.Thread(target=_load_detector, daemon=True).start()
+threading.Thread(target=_load_rewriter, daemon=True).start()
 
 
 def get_detector():
-    global _detector
-    if _detector is None:
-        _detector = PlagiarismDetector()
-    return _detector
+    with _lock:
+        return _models['detector']
 
 
 def get_rewriter():
-    global _rewriter
-    if _rewriter is None:
-        _rewriter = RewriteEngine()
-    return _rewriter
+    with _lock:
+        return _models['rewriter']
 
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.route('/')
 def index():
@@ -79,6 +131,19 @@ def index():
 @app.route('/checker')
 def checker():
     return render_template('checker.html')
+
+
+@app.route('/status')
+def status():
+    """Polled by the frontend to show real model-loading progress."""
+    with _lock:
+        return jsonify({
+            'detector_status': _models['detector_status'],
+            'rewriter_status': _models['rewriter_status'],
+            'detector_error':  _models['detector_error'],
+            'rewriter_error':  _models['rewriter_error'],
+            'all_ready':       _models['detector_ready'] and _models['rewriter_ready'],
+        })
 
 
 @app.route('/upload', methods=['POST'])
@@ -103,7 +168,6 @@ def upload_file():
         if not text or len(text.strip()) < 50:
             return jsonify({'error': 'Could not extract enough text from the file.'}), 400
 
-        # Store full text server-side (no cookie size limit with flask-session)
         session['original_text'] = text
 
         preview    = text[:500] + '…' if len(text) > 500 else text
@@ -125,19 +189,22 @@ def upload_file():
 
 @app.route('/detect', methods=['POST'])
 def detect_plagiarism():
+    detector = get_detector()
+    if detector is None:
+        with _lock:
+            err = _models['detector_error']
+        msg = f'Detector error: {err}' if err else 'Models are still loading. Please wait a moment and try again.'
+        return jsonify({'error': msg}), 503
+
     body = request.get_json(silent=True) or {}
     text = (body.get('text') or '').strip()
-
     if not text:
         text = (session.get('original_text') or '').strip()
-
     if not text:
         return jsonify({'error': 'No text to analyse. Upload or paste text first.'}), 400
 
     try:
-        detector  = get_detector()
         sentences = segment_sentences(text)
-
         if len(sentences) < 2:
             return jsonify({'error': 'Need at least 2 sentences.'}), 400
 
@@ -161,6 +228,13 @@ def detect_plagiarism():
 
 @app.route('/rewrite', methods=['POST'])
 def rewrite_content():
+    rewriter = get_rewriter()
+    if rewriter is None:
+        with _lock:
+            err = _models['rewriter_error']
+        msg = f'Rewriter error: {err}' if err else 'Rewrite model is still loading. Please wait and try again.'
+        return jsonify({'error': msg}), 503
+
     body      = request.get_json(silent=True) or {}
     threshold = float(body.get('threshold', 0.30))
 
@@ -168,48 +242,50 @@ def rewrite_content():
     if not sentences:
         return jsonify({'error': 'No sentences to rewrite. Run detection first.'}), 400
 
-    # Prefer session-stored scores (authoritative)
-    stored       = session.get('detection_results', {})
-    sent_scores  = stored.get('sentence_scores', [])
-    overall_in   = float(stored.get('overall_score', 0))
+    stored      = session.get('detection_results', {})
+    sent_scores = stored.get('sentence_scores', [])
+    overall_in  = float(stored.get('overall_score', 0))
 
-    # Fallback to client-sent scores if session expired
     if not sent_scores:
         raw         = body.get('results') or {}
         sent_scores = raw.get('sentence_scores', [])
         overall_in  = float(raw.get('overall_score', 0))
 
-    # Adaptive threshold: if all scores are below threshold, use top-third
+    # Adaptive threshold
     if sent_scores:
         all_scores = [float(s.get('combined_score', 0)) for s in sent_scores]
-        max_score  = max(all_scores)
-        if max_score < threshold:
+        if max(all_scores) < threshold:
             sorted_scores = sorted(all_scores, reverse=True)
             top_n         = max(1, len(sorted_scores) // 3)
             threshold     = max(sorted_scores[top_n - 1], 0.05)
 
     try:
-        rewriter            = get_rewriter()
+        # Collect per-sentence scores
+        scores_list = [
+            float((sent_scores[i] if i < len(sent_scores) else {}).get('combined_score', 0))
+            for i in range(len(sentences))
+        ]
+
+        # Identify which sentences need rewriting
+        flagged_idx   = [i for i, sc in enumerate(scores_list) if sc >= threshold]
+        flagged_sents = [sentences[i] for i in flagged_idx]
+
+        # Single batched GPU/CPU call — no sequential-pipeline warning
+        batch_results = rewriter.rewrite_batch(flagged_sents) if flagged_sents else []
+        rewrite_map   = dict(zip(flagged_idx, batch_results))
+
         rewritten_sentences = []
-
         for i, sentence in enumerate(sentences):
-            score_data = sent_scores[i] if i < len(sent_scores) else {}
-            score      = float(score_data.get('combined_score', 0))
-
-            if score >= threshold:
-                rewritten = rewriter.rewrite(sentence)
+            score = scores_list[i]
+            if i in rewrite_map:
                 rewritten_sentences.append({
-                    'original':       sentence,
-                    'rewritten':      rewritten,
-                    'was_rewritten':  True,
-                    'original_score': score,
+                    'original': sentence, 'rewritten': rewrite_map[i],
+                    'was_rewritten': True, 'original_score': score,
                 })
             else:
                 rewritten_sentences.append({
-                    'original':       sentence,
-                    'rewritten':      sentence,
-                    'was_rewritten':  False,
-                    'original_score': score,
+                    'original': sentence, 'rewritten': sentence,
+                    'was_rewritten': False, 'original_score': score,
                 })
 
         new_text    = ' '.join(s['rewritten'] for s in rewritten_sentences)
@@ -252,16 +328,12 @@ def download_report():
         return jsonify({'error': f'Report error: {e}'}), 500
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
-
 if __name__ == '__main__':
     app.run(
         debug=True,
         host='0.0.0.0',
         port=5000,
-        # Exclude heavy library folders from the reloader file watcher
         exclude_patterns=[
-            '*.pyc',
             '*site-packages*',
             '*torch*',
             '*transformers*',
