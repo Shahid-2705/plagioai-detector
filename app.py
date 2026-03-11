@@ -1,28 +1,51 @@
 """
 AI Plagiarism Detector & Rewriter - Flask Application
+
+Fixes applied:
+  1. Server-side file system sessions (flask-session) — no more 4 KB cookie limit
+  2. Flask reloader exclude_patterns — stops watching site-packages/torch/transformers
 """
 
 import os
 import uuid
 from flask import Flask, render_template, request, jsonify, send_file, session
 from flask_cors import CORS
+from flask_session import Session
 from werkzeug.utils import secure_filename
 from core.file_parser import extract_text_from_file
-from core.text_preprocessor import preprocess_text, segment_sentences
+from core.text_preprocessor import segment_sentences
 from core.plagiarism_detector import PlagiarismDetector
 from core.rewrite_engine import RewriteEngine
 from core.report_generator import generate_report
 
+# ── App setup ─────────────────────────────────────────────────────────────────
+
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['SESSION_COOKIE_SECURE'] = False
 
+# ── Server-side session (filesystem) — bypasses the 4 KB cookie limit ─────────
+SESSION_DIR = os.path.join(os.path.dirname(__file__), 'flask_sessions')
+os.makedirs(SESSION_DIR, exist_ok=True)
+
+app.config.update(
+    SESSION_TYPE            = 'filesystem',
+    SESSION_FILE_DIR        = SESSION_DIR,
+    SESSION_PERMANENT       = False,
+    SESSION_USE_SIGNER      = True,
+    SESSION_COOKIE_SAMESITE = 'Lax',
+    SESSION_COOKIE_SECURE   = False,
+    UPLOAD_FOLDER           = os.path.join(os.path.dirname(__file__), 'uploads'),
+    MAX_CONTENT_LENGTH      = 16 * 1024 * 1024,   # 16 MB
+)
+
+Session(app)   # initialise flask-session AFTER config
 CORS(app, supports_credentials=True)
 
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
 ALLOWED_EXTENSIONS = {'pdf', 'docx', 'txt'}
+
+# ── Lazy-loaded ML engines ────────────────────────────────────────────────────
 
 _detector = None
 _rewriter = None
@@ -80,6 +103,7 @@ def upload_file():
         if not text or len(text.strip()) < 50:
             return jsonify({'error': 'Could not extract enough text from the file.'}), 400
 
+        # Store full text server-side (no cookie size limit with flask-session)
         session['original_text'] = text
 
         preview    = text[:500] + '…' if len(text) > 500 else text
@@ -88,7 +112,7 @@ def upload_file():
 
         return jsonify({
             'success':    True,
-            'full_text':  text,       # full text returned so JS can forward it to /detect
+            'full_text':  text,
             'preview':    preview,
             'word_count': word_count,
             'char_count': char_count,
@@ -104,30 +128,27 @@ def detect_plagiarism():
     body = request.get_json(silent=True) or {}
     text = (body.get('text') or '').strip()
 
-    # Fallback to session if the client didn't resend the full text
     if not text:
         text = (session.get('original_text') or '').strip()
 
     if not text:
-        return jsonify({'error': 'No text to analyse. Please upload or paste text first.'}), 400
+        return jsonify({'error': 'No text to analyse. Upload or paste text first.'}), 400
 
     try:
         detector  = get_detector()
         sentences = segment_sentences(text)
 
         if len(sentences) < 2:
-            return jsonify({'error': 'Text too short — need at least 2 sentences.'}), 400
+            return jsonify({'error': 'Need at least 2 sentences.'}), 400
 
         results = detector.analyze(sentences)
 
-        # Persist to session so /rewrite can retrieve them without the client resending
         session['sentences']         = sentences
-        session['detection_results'] = results   # contains 'sentence_scores' and 'overall_score'
+        session['detection_results'] = results
 
         return jsonify({
             'success':           True,
             'sentences':         sentences,
-            # key name that the JS renderResults() reads
             'results':           results['sentence_scores'],
             'overall_score':     results['overall_score'],
             'high_risk_count':   results['high_risk_count'],
@@ -141,41 +162,31 @@ def detect_plagiarism():
 @app.route('/rewrite', methods=['POST'])
 def rewrite_content():
     body      = request.get_json(silent=True) or {}
-    threshold = float(body.get('threshold', 0.30))   # sensible default: rewrite ≥ 30 %
+    threshold = float(body.get('threshold', 0.30))
 
-    # ── Sentences ────────────────────────────────────────────────────────────
     sentences = body.get('sentences') or session.get('sentences', [])
     if not sentences:
         return jsonify({'error': 'No sentences to rewrite. Run detection first.'}), 400
 
-    # ── Sentence scores ───────────────────────────────────────────────────────
-    # JS sends: { results: { sentence_scores: [...], overall_score: N } }
-    raw          = body.get('results') or {}
-    sent_scores  = raw.get('sentence_scores', [])
-    overall_in   = float(raw.get('overall_score', 0))
+    # Prefer session-stored scores (authoritative)
+    stored       = session.get('detection_results', {})
+    sent_scores  = stored.get('sentence_scores', [])
+    overall_in   = float(stored.get('overall_score', 0))
 
-    # Always prefer the session-stored results (authoritative, server-side)
-    stored = session.get('detection_results', {})
+    # Fallback to client-sent scores if session expired
     if not sent_scores:
-        sent_scores = stored.get('sentence_scores', [])
-    if not overall_in:
-        overall_in = float(stored.get('overall_score', 0))
+        raw         = body.get('results') or {}
+        sent_scores = raw.get('sentence_scores', [])
+        overall_in  = float(raw.get('overall_score', 0))
 
-    # ── Adaptive threshold ────────────────────────────────────────────────────
-    # If every sentence is below the requested threshold (common for original
-    # text being compared against itself) we lower the bar to the top-30 % of
-    # scores in the document, so the user always sees *something* rewritten.
+    # Adaptive threshold: if all scores are below threshold, use top-third
     if sent_scores:
         all_scores = [float(s.get('combined_score', 0)) for s in sent_scores]
-        max_score  = max(all_scores) if all_scores else 0
-
+        max_score  = max(all_scores)
         if max_score < threshold:
-            # Use top-30th-percentile of document scores as threshold
             sorted_scores = sorted(all_scores, reverse=True)
-            top_n         = max(1, len(sorted_scores) // 3)   # top third
-            threshold     = sorted_scores[top_n - 1]
-            # Clamp: never rewrite everything if the doc is fully original
-            threshold     = max(threshold, 0.05)
+            top_n         = max(1, len(sorted_scores) // 3)
+            threshold     = max(sorted_scores[top_n - 1], 0.05)
 
     try:
         rewriter            = get_rewriter()
@@ -184,9 +195,8 @@ def rewrite_content():
         for i, sentence in enumerate(sentences):
             score_data = sent_scores[i] if i < len(sent_scores) else {}
             score      = float(score_data.get('combined_score', 0))
-            should_rewrite = score >= threshold
 
-            if should_rewrite:
+            if score >= threshold:
                 rewritten = rewriter.rewrite(sentence)
                 rewritten_sentences.append({
                     'original':       sentence,
@@ -202,24 +212,20 @@ def rewrite_content():
                     'original_score': score,
                 })
 
-        # Re-score the rewritten text
-        new_text     = ' '.join(s['rewritten'] for s in rewritten_sentences)
-        detector     = get_detector()
-        new_sents    = segment_sentences(new_text)
-        new_results  = detector.analyze(new_sents)
-        new_score    = new_results['overall_score']
+        new_text    = ' '.join(s['rewritten'] for s in rewritten_sentences)
+        new_sents   = segment_sentences(new_text)
+        new_results = get_detector().analyze(new_sents)
+        new_score   = new_results['overall_score']
 
         session['rewritten_sentences'] = rewritten_sentences
         session['new_score']           = new_score
-
-        rewritten_count = sum(1 for s in rewritten_sentences if s['was_rewritten'])
 
         return jsonify({
             'success':             True,
             'rewritten_sentences': rewritten_sentences,
             'original_score':      overall_in,
             'new_score':           new_score,
-            'rewritten_count':     rewritten_count,
+            'rewritten_count':     sum(1 for s in rewritten_sentences if s['was_rewritten']),
         })
 
     except Exception as e:
@@ -228,9 +234,9 @@ def rewrite_content():
 
 @app.route('/report', methods=['POST'])
 def download_report():
-    body         = request.get_json(silent=True) or {}
-    format_type  = body.get('format', 'pdf')
-    orig_score   = float(body.get('original_score', 0))
+    body        = request.get_json(silent=True) or {}
+    format_type = body.get('format', 'pdf')
+    orig_score  = float(body.get('original_score', 0))
 
     rewritten_sentences = session.get('rewritten_sentences', [])
     new_score           = float(session.get('new_score', 0))
@@ -240,15 +246,25 @@ def download_report():
 
     try:
         filepath = generate_report(rewritten_sentences, orig_score, new_score, format_type)
-        return send_file(
-            filepath,
-            as_attachment=True,
-            download_name=f'plagiarism_report.{format_type}',
-        )
+        return send_file(filepath, as_attachment=True,
+                         download_name=f'plagiarism_report.{format_type}')
     except Exception as e:
         return jsonify({'error': f'Report error: {e}'}), 500
 
 
+# ── Entry point ───────────────────────────────────────────────────────────────
+
 if __name__ == '__main__':
-    os.makedirs('uploads', exist_ok=True)
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(
+        debug=True,
+        host='0.0.0.0',
+        port=5000,
+        # Exclude heavy library folders from the reloader file watcher
+        exclude_patterns=[
+            '*.pyc',
+            '*site-packages*',
+            '*torch*',
+            '*transformers*',
+            '*sentence_transformers*',
+        ],
+    )
