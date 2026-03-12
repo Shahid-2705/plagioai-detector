@@ -1,23 +1,23 @@
 'use strict';
 
-/* ===========================================
-   PLAGIOAI — script.js
-   Full feature set:
-   - Drag & drop upload
-   - File remove
-   - Manual text paste
-   - 4-step panel navigation
-   - Score ring animation
-   - Sentence list rendering
-   - Rewrite side-by-side view
-   - Report summary + download
-   - Loading overlay & toast notifications
-   - credentials: 'include' on every fetch
-=========================================== */
+/* =====================================================
+   PlagioAI — script.js  (Advanced Edition)
 
-/* ── State ─────────────────────────────── */
+   Workflow:
+     Upload → Detect → Rewrite High-Risk → Compare
+     → Download Report  |  Download Full Document
 
-const state = {
+   New in this version:
+     - Hard threshold 0.70 for rewriting
+     - btn-download-rewritten (TXT + DOCX)
+     - Non-rewritable sentences shown with "Skipped" badge
+     - Score reduction badge on compare panel
+     - Richer status polling with per-model pills
+===================================================== */
+
+/* ── State ──────────────────────────────────────────── */
+
+var state = {
     text:             '',
     filename:         '',
     sentences:        [],
@@ -25,36 +25,36 @@ const state = {
     rewrittenData:    null
 };
 
-/* ── DOM helper ─────────────────────────── */
+/* ── DOM shorthand ──────────────────────────────────── */
 
-const $ = (id) => document.getElementById(id);
+var $ = function (id) { return document.getElementById(id); };
 
-/* ── Loading overlay ────────────────────── */
+/* ── Loading overlay ─────────────────────────────────── */
 
 function showLoading(msg) {
-    const overlay = $('loading-overlay');
-    const label   = $('loading-msg');
+    var overlay = $('loading-overlay');
+    var label   = $('loading-msg');
     if (overlay) overlay.classList.remove('hidden');
     if (label)   label.textContent = msg || 'Processing…';
 }
 
 function hideLoading() {
-    const overlay = $('loading-overlay');
+    var overlay = $('loading-overlay');
     if (overlay) overlay.classList.add('hidden');
 }
 
-/* ── Toast notifications ────────────────── */
+/* ── Toast ───────────────────────────────────────────── */
 
 function showToast(msg, type) {
-    const t = $('toast');
+    var t = $('toast');
     if (!t) return;
     t.textContent = msg;
     t.className   = 'toast show ' + (type || '');
     clearTimeout(t._timer);
-    t._timer = setTimeout(function () { t.className = 'toast hidden'; }, 3500);
+    t._timer = setTimeout(function () { t.className = 'toast hidden'; }, 4000);
 }
 
-/* ── Risk helpers ───────────────────────── */
+/* ── Utilities ───────────────────────────────────────── */
 
 function riskClass(score) {
     if (score >= 0.70) return 'high';
@@ -72,19 +72,30 @@ function escapeHtml(str) {
     return String(str || '').replace(/[&<>"']/g, function (m) { return map[m]; });
 }
 
-/* ── Step tracker ───────────────────────── */
+function triggerDownload(blob, filename) {
+    var url = URL.createObjectURL(blob);
+    var a   = document.createElement('a');
+    a.href     = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+/* ── Step tracker ────────────────────────────────────── */
 
 function activateStep(n) {
     for (var i = 1; i <= 4; i++) {
         var el = $('step-' + i);
         if (!el) continue;
         el.classList.remove('active', 'done');
-        if (i < n)  el.classList.add('done');
+        if (i < n)   el.classList.add('done');
         if (i === n) el.classList.add('active');
     }
 }
 
-/* ── Panel navigation ───────────────────── */
+/* ── Panel navigation ────────────────────────────────── */
 
 function showPanel(name) {
     document.querySelectorAll('.panel').forEach(function (p) {
@@ -99,47 +110,81 @@ function showPanel(name) {
     }
 }
 
-/* ── Upload zone (drag & drop + click) ─── */
+/* ── Model status polling ─────────────────────────────── */
+
+var _modelsReady = false;
+
+(function startPolling() {
+    var STATUS_ICON = { loading: '⏳', ready: '✓', error: '✗' };
+
+    function updatePill(id, status, label) {
+        var pill = $(id);
+        if (!pill) return;
+        pill.textContent = STATUS_ICON[status] + ' ' + label;
+        pill.className   = 'status-pill ' + status;
+    }
+
+    function poll() {
+        fetch('/status', { credentials: 'include' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                updatePill('pill-detector',  d.detector_status, 'Detector');
+                updatePill('pill-rewriter',  d.rewriter_status, 'Rewriter');
+
+                var banner    = $('model-banner');
+                var bannerMsg = $('model-banner-msg');
+
+                if (d.all_ready) {
+                    _modelsReady = true;
+                    if (bannerMsg) bannerMsg.textContent = '✓ All models ready — GPU accelerated.';
+                    if (banner)    banner.classList.add('ready');
+                    setTimeout(function () {
+                        if (banner) banner.classList.add('hidden');
+                    }, 2000);
+                } else {
+                    var msgs = [];
+                    if (d.detector_status === 'loading') msgs.push('Loading detector…');
+                    if (d.rewriter_status === 'loading') msgs.push('Loading rewriter (flan-t5-large)…');
+                    if (d.detector_status === 'error')   msgs.push('Detector error: ' + d.detector_error);
+                    if (d.rewriter_status === 'error')   msgs.push('Rewriter error: ' + d.rewriter_error);
+                    if (bannerMsg) bannerMsg.textContent = msgs.join('  ·  ') || 'Loading models…';
+                    setTimeout(poll, 2500);
+                }
+            })
+            .catch(function () { setTimeout(poll, 3000); });
+    }
+
+    document.addEventListener('DOMContentLoaded', function () { poll(); });
+}());
+
+/* ── Upload zone ─────────────────────────────────────── */
 
 function initUploadZone() {
     var zone  = $('upload-zone');
     var input = $('file-input');
     if (!zone || !input) return;
 
-    /* Click to open file picker */
     zone.addEventListener('click', function () { input.click(); });
 
-    /* Drag over */
     zone.addEventListener('dragover', function (e) {
         e.preventDefault();
         zone.classList.add('drag-over');
     });
-
-    /* Drag leave */
     zone.addEventListener('dragleave', function (e) {
-        if (!zone.contains(e.relatedTarget)) {
-            zone.classList.remove('drag-over');
-        }
+        if (!zone.contains(e.relatedTarget)) zone.classList.remove('drag-over');
     });
-
-    /* Drop */
     zone.addEventListener('drop', function (e) {
         e.preventDefault();
         zone.classList.remove('drag-over');
-        var file = e.dataTransfer.files[0];
-        if (file) handleFileSelected(file);
+        if (e.dataTransfer.files[0]) handleFileSelected(e.dataTransfer.files[0]);
     });
-
-    /* Input change */
     input.addEventListener('change', function () {
         if (input.files.length > 0) handleFileSelected(input.files[0]);
     });
 
-    /* Remove file button */
     var removeBtn = $('remove-file');
     if (removeBtn) removeBtn.addEventListener('click', resetFile);
 
-    /* Manual text area — enable detect button when enough text is pasted */
     var manualArea = $('manual-text');
     if (manualArea) {
         manualArea.addEventListener('input', function () {
@@ -161,41 +206,27 @@ function enableDetect(on) {
     if (btn) btn.disabled = !on;
 }
 
-/* ── File selected handler ──────────────── */
-
 async function handleFileSelected(file) {
-    var ext     = file.name.split('.').pop().toLowerCase();
-    var allowed = ['pdf', 'docx', 'txt'];
-
-    if (!allowed.includes(ext)) {
+    var ext = file.name.split('.').pop().toLowerCase();
+    if (!['pdf', 'docx', 'txt'].includes(ext)) {
         showToast('Unsupported file type. Use PDF, DOCX, or TXT.', 'error');
         return;
     }
 
-    showLoading('Extracting text from file…');
-
+    showLoading('Extracting text…');
     var formData = new FormData();
     formData.append('file', file);
 
     try {
-        var res  = await fetch('/upload', {
-            method: 'POST',
-            body:   formData,
-            credentials: 'include'
-        });
+        var res  = await fetch('/upload', { method: 'POST', body: formData, credentials: 'include' });
         var data = await res.json();
         hideLoading();
 
-        if (!res.ok || data.error) {
-            showToast(data.error || 'Upload failed', 'error');
-            return;
-        }
+        if (!res.ok || data.error) { showToast(data.error || 'Upload failed', 'error'); return; }
 
-        /* Store the FULL text so /detect receives the complete document */
         state.text     = data.full_text || data.preview || '';
         state.filename = data.filename  || file.name;
 
-        /* Update UI */
         var nameEl = $('file-name');
         var metaEl = $('file-meta');
         var infoEl = $('file-info');
@@ -219,54 +250,39 @@ async function handleFileSelected(file) {
     }
 }
 
-/* ── Reset file ─────────────────────────── */
-
 function resetFile() {
-    state.text     = '';
-    state.filename = '';
-
+    state.text = ''; state.filename = '';
     var input = $('file-input');
     if (input) input.value = '';
-
     ['file-info', 'text-preview-wrap'].forEach(function (id) {
-        var el = $(id);
-        if (el) el.classList.add('hidden');
+        var el = $(id); if (el) el.classList.add('hidden');
     });
-
     var manual = $('manual-text');
     if (manual) manual.value = '';
-
     enableDetect(false);
 }
 
-/* ── Detection ──────────────────────────── */
+/* ── Detection ───────────────────────────────────────── */
 
 async function runDetection() {
-    var manualEl = $('manual-text');
-    var manual   = manualEl ? manualEl.value.trim() : '';
-    var text     = state.text || manual;
+    var manual = $('manual-text') ? $('manual-text').value.trim() : '';
+    var text   = state.text || manual;
 
-    if (!text) {
-        showToast('Upload a file or paste text first.', 'error');
-        return;
-    }
+    if (!text) { showToast('Upload a file or paste text first.', 'error'); return; }
 
-    showLoading('Analysing plagiarism… this may take a moment.');
+    showLoading(_modelsReady ? 'Analysing plagiarism…' : 'Loading detector + analysing… first run takes 30–60 s.');
 
     try {
         var res  = await fetch('/detect', {
-            method:  'POST',
+            method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
-            body:    JSON.stringify({ text: text })
+            body: JSON.stringify({ text: text })
         });
         var data = await res.json();
         hideLoading();
 
-        if (!res.ok || data.error) {
-            showToast(data.error || 'Detection failed', 'error');
-            return;
-        }
+        if (!res.ok || data.error) { showToast(data.error || 'Detection failed', 'error'); return; }
 
         state.sentences        = data.sentences || [];
         state.detectionResults = data;
@@ -281,36 +297,30 @@ async function runDetection() {
     }
 }
 
-/* ── Render detection results ───────────── */
+/* ── Render detection results ────────────────────────── */
 
 function renderResults(data) {
     var score = data.overall_score || 0;
 
-    /* Score percentage label */
+    // Score ring
     var pctEl = $('score-pct');
     if (pctEl) pctEl.textContent = Math.round(score) + '%';
-
-    /* Animate SVG score ring */
     animateRing(score);
 
-    /* Risk counters */
-    var highEl   = $('count-high');
-    var mediumEl = $('count-medium');
-    var lowEl    = $('count-low');
-    var totalSentences = (data.sentences || []).length;
-    var highCount      = data.high_risk_count   || 0;
-    var mediumCount    = data.medium_risk_count || 0;
+    // Risk counters
+    var hi  = $('count-high');
+    var med = $('count-medium');
+    var lo  = $('count-low');
+    var total = (data.sentences || []).length;
+    if (hi)  hi.textContent  = data.high_risk_count   || 0;
+    if (med) med.textContent = data.medium_risk_count || 0;
+    if (lo)  lo.textContent  = total - (data.high_risk_count || 0) - (data.medium_risk_count || 0);
 
-    if (highEl)   highEl.textContent   = highCount;
-    if (mediumEl) mediumEl.textContent = mediumCount;
-    if (lowEl)    lowEl.textContent    = totalSentences - highCount - mediumCount;
-
-    /* Sentence list */
-    var list = $('sentence-list');
+    // Sentence list
+    var list    = $('sentence-list');
     if (!list) return;
     list.innerHTML = '';
 
-    /* Backend returns sentence scores under key "results" */
     var scores    = data.results || data.sentence_scores || [];
     var sentences = data.sentences || [];
 
@@ -321,7 +331,6 @@ function renderResults(data) {
 
         var div = document.createElement('div');
         div.className = 'sentence-item ' + risk;
-
         div.innerHTML =
             '<span class="s-index">#' + (i + 1) + '</span>' +
             '<div class="s-content">' +
@@ -338,44 +347,30 @@ function renderResults(data) {
     });
 }
 
-/* ── Score ring animation ───────────────── */
-
 function animateRing(score) {
     var ring = $('score-ring');
     if (!ring) return;
-
-    var circumference = 326.73;           /* 2π × r=52 */
-    var targetOffset  = circumference - (Math.min(score, 100) / 100) * circumference;
-
-    /* Colour by severity */
-    if (score >= 70)      ring.style.stroke = 'var(--high)';
-    else if (score >= 40) ring.style.stroke = 'var(--medium)';
-    else                  ring.style.stroke = 'var(--low)';
-
-    /* Start from full offset (empty ring) then animate to target */
+    var C = 326.73;
+    ring.style.stroke = score >= 70 ? 'var(--high)' : score >= 40 ? 'var(--medium)' : 'var(--low)';
     ring.style.transition = 'none';
-    ring.style.strokeDashoffset = circumference;
-
-    /* Force reflow so the transition actually plays */
-    ring.getBoundingClientRect();
-
-    ring.style.transition       = 'stroke-dashoffset 1.2s cubic-bezier(0.4, 0, 0.2, 1)';
-    ring.style.strokeDashoffset = targetOffset;
+    ring.style.strokeDashoffset = C;
+    ring.getBoundingClientRect();   // force reflow
+    ring.style.transition = 'stroke-dashoffset 1.2s cubic-bezier(0.4,0,0.2,1)';
+    ring.style.strokeDashoffset = C - (Math.min(score, 100) / 100) * C;
 }
 
-/* ── Rewrite ────────────────────────────── */
+/* ── Rewrite ─────────────────────────────────────────── */
 
 async function runRewrite() {
-    if (!state.detectionResults) {
-        showToast('Run detection first.', 'error');
-        return;
-    }
+    if (!state.detectionResults) { showToast('Run detection first.', 'error'); return; }
 
-    showLoading('Rewriting high-risk sentences with AI… please wait.');
+    showLoading(_modelsReady
+        ? 'Rewriting high-risk sentences (≥70%) with flan-t5-large…'
+        : 'Loading rewriter + rewriting… first run takes 60–120 s.');
 
     try {
         var res  = await fetch('/rewrite', {
-            method:  'POST',
+            method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
             body: JSON.stringify({
@@ -383,18 +378,15 @@ async function runRewrite() {
                 results: {
                     sentence_scores: state.detectionResults.results ||
                                      state.detectionResults.sentence_scores || [],
-                    overall_score:   state.detectionResults.overall_score   || 0
+                    overall_score:   state.detectionResults.overall_score || 0
                 },
-                threshold: 0.30
+                threshold: 0.70   // hard threshold — only genuine high-risk
             })
         });
         var data = await res.json();
         hideLoading();
 
-        if (!res.ok || data.error) {
-            showToast(data.error || 'Rewrite failed', 'error');
-            return;
-        }
+        if (!res.ok || data.error) { showToast(data.error || 'Rewrite failed', 'error'); return; }
 
         state.rewrittenData = data;
         renderRewritten(data);
@@ -407,47 +399,50 @@ async function runRewrite() {
     }
 }
 
-/* ── Render rewritten content ───────────── */
+/* ── Render rewritten content ────────────────────────── */
 
 function renderRewritten(data) {
-    /* Score comparison bar
-       original_score comes from the detection overall_score stored server-side.
-       If it arrives as 0, fall back to the value saved in state. */
     var origScore = data.original_score ||
                     (state.detectionResults ? state.detectionResults.overall_score : 0) || 0;
-    var newScore  = data.new_score || 0;
+    var newScore  = data.new_score  || 0;
     var rwCount   = data.rewritten_count || 0;
+    var reduction = origScore - newScore;
 
-    var before = $('compare-before');
-    var after  = $('compare-after');
-    var count  = $('compare-count');
-    if (before) before.textContent = Math.round(origScore) + '%';
-    if (after)  after.textContent  = Math.round(newScore)  + '%';
-    if (count)  count.textContent  = rwCount + ' sentences';
+    if ($('compare-before')) $('compare-before').textContent = Math.round(origScore) + '%';
+    if ($('compare-after'))  $('compare-after').textContent  = Math.round(newScore)  + '%';
+    if ($('compare-count'))  $('compare-count').textContent  = rwCount + ' sentences';
 
-    /* Side-by-side list */
+    // Score reduction badge
+    var badge = $('compare-reduction');
+    if (badge) {
+        badge.textContent = (reduction >= 0 ? '↓ ' : '↑ ') + Math.abs(Math.round(reduction)) + '% reduction';
+        badge.className   = 'compare-reduction-badge ' + (reduction >= 0 ? 'positive' : 'negative');
+    }
+
     var list = $('rewrite-list');
     if (!list) return;
     list.innerHTML = '';
 
     (data.rewritten_sentences || []).forEach(function (s, i) {
-        var tagClass = s.was_rewritten ? 'rewritten' : 'unchanged';
-        var tagLabel = s.was_rewritten ? '&#9998; Rewritten' : '&mdash; Unchanged';
+        var wasRewritten = s.was_rewritten;
+        var isHighRisk   = (s.original_score || 0) >= 0.70;
 
-        var div       = document.createElement('div');
-        div.className = 'rewrite-item' + (s.was_rewritten ? ' changed' : '');
+        // Determine badge
+        var tagClass, tagLabel;
+        if (wasRewritten) {
+            tagClass = 'rewritten'; tagLabel = '&#9998; Rewritten';
+        } else if (isHighRisk) {
+            tagClass = 'skipped';   tagLabel = '&#9888; Skipped';   // non-rewritable
+        } else {
+            tagClass = 'unchanged'; tagLabel = '&mdash; Unchanged';
+        }
 
-        var rewrittenRow = s.was_rewritten
-            ? '<div class="rewrite-row">' +
-                  '<span class="rewrite-row-label">Rewritten</span>' +
-                  '<p class="rewrite-row-text rewritten-text">' + escapeHtml(s.rewritten) + '</p>' +
-              '</div>'
-            : '';
-
+        var div = document.createElement('div');
+        div.className = 'rewrite-item' + (wasRewritten ? ' changed' : '');
         div.innerHTML =
             '<div class="rewrite-header">' +
-                '<span>Sentence ' + (i + 1) + ' &middot; ' +
-                    'Original score: ' + Math.round((s.original_score || 0) * 100) + '%</span>' +
+                '<span>Sentence ' + (i + 1) + ' &middot; Score: ' +
+                    Math.round((s.original_score || 0) * 100) + '%</span>' +
                 '<span class="rewrite-tag ' + tagClass + '">' + tagLabel + '</span>' +
             '</div>' +
             '<div class="rewrite-body">' +
@@ -455,14 +450,19 @@ function renderRewritten(data) {
                     '<span class="rewrite-row-label">Original</span>' +
                     '<p class="rewrite-row-text original">' + escapeHtml(s.original) + '</p>' +
                 '</div>' +
-                rewrittenRow +
+                (wasRewritten
+                    ? '<div class="rewrite-row">' +
+                          '<span class="rewrite-row-label">Rewritten</span>' +
+                          '<p class="rewrite-row-text rewritten-text">' + escapeHtml(s.rewritten) + '</p>' +
+                      '</div>'
+                    : '') +
             '</div>';
 
         list.appendChild(div);
     });
 }
 
-/* ── Report ─────────────────────────────── */
+/* ── Report ──────────────────────────────────────────── */
 
 function renderReportSummary() {
     var d  = state.rewrittenData;
@@ -474,15 +474,16 @@ function renderReportSummary() {
     el.textContent =
         'Original Plagiarism Score:   ' + Math.round(d.original_score || 0) + '%\n' +
         'New Plagiarism Score:         ' + Math.round(d.new_score      || 0) + '%\n' +
-        'Score Reduction:              ' + (reduction >= 0 ? '-' : '+') +
-                                           Math.abs(Math.round(reduction)) + '%\n' +
+        'Score Reduction:              ' + (reduction >= 0 ? '-' : '+') + Math.abs(Math.round(reduction)) + '%\n' +
         'Sentences Rewritten:          ' + (d.rewritten_count || 0) + '\n' +
-        'Total Sentences Analysed:     ' + (d.rewritten_sentences || []).length;
+        'Total Sentences Analysed:     ' + (d.rewritten_sentences || []).length + '\n' +
+        'Rewrite Threshold:            ≥ 70% similarity\n' +
+        'Embedding Model:              all-mpnet-base-v2\n' +
+        'Rewrite Model:                google/flan-t5-large';
 }
 
 async function downloadReport(format) {
     showLoading('Generating ' + format.toUpperCase() + ' report…');
-
     try {
         var d   = state.rewrittenData || {};
         var res = await fetch('/report', {
@@ -492,24 +493,47 @@ async function downloadReport(format) {
             body: JSON.stringify({ format: format, original_score: d.original_score || 0 })
         });
         hideLoading();
-
         if (!res.ok) {
             var err = await res.json().catch(function () { return {}; });
             showToast(err.error || 'Report generation failed', 'error');
             return;
         }
-
-        var blob = await res.blob();
-        var url  = URL.createObjectURL(blob);
-        var a    = document.createElement('a');
-        a.href     = url;
-        a.download = 'plagiarism_report.' + format;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-
+        triggerDownload(await res.blob(), 'plagiarism_report.' + format);
         showToast('Report downloaded!', 'success');
+    } catch (err) {
+        hideLoading();
+        showToast('Download error: ' + err.message, 'error');
+    }
+}
+
+/* ── Download full rewritten document ───────────────── */
+
+async function downloadRewrittenDoc(format) {
+    if (!state.rewrittenData) {
+        showToast('Complete the rewrite step first.', 'error');
+        return;
+    }
+
+    format = format || 'docx';
+    showLoading('Preparing rewritten document (' + format.toUpperCase() + ')…');
+
+    try {
+        var res = await fetch('/download_rewritten', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ format: format })
+        });
+        hideLoading();
+
+        if (!res.ok) {
+            var err = await res.json().catch(function () { return {}; });
+            showToast(err.error || 'Download failed', 'error');
+            return;
+        }
+
+        triggerDownload(await res.blob(), 'rewritten_document.' + format);
+        showToast('Rewritten document downloaded!', 'success');
 
     } catch (err) {
         hideLoading();
@@ -517,22 +541,18 @@ async function downloadReport(format) {
     }
 }
 
-/* ── Initialise ─────────────────────────── */
+/* ── Init ────────────────────────────────────────────── */
 
 document.addEventListener('DOMContentLoaded', function () {
 
-    /* Upload zone (drag-drop, file picker, manual textarea) */
     initUploadZone();
 
-    /* Step 1 → 2: Detect */
     var btnDetect = $('btn-detect');
     if (btnDetect) btnDetect.addEventListener('click', runDetection);
 
-    /* Step 2 → 3: Rewrite */
     var btnRewrite = $('btn-rewrite');
     if (btnRewrite) btnRewrite.addEventListener('click', runRewrite);
 
-    /* Step 3 → 4: Report */
     var btnReport = $('btn-report');
     if (btnReport) btnReport.addEventListener('click', function () {
         renderReportSummary();
@@ -540,17 +560,27 @@ document.addEventListener('DOMContentLoaded', function () {
         activateStep(4);
     });
 
-    /* Back: results → upload */
+    var btnDownloadRewritten = $('btn-download-rewritten');
+    if (btnDownloadRewritten) {
+        btnDownloadRewritten.addEventListener('click', function () {
+            downloadRewrittenDoc('docx');
+        });
+    }
+
+    var btnDownloadRewrittenTxt = $('btn-download-rewritten-txt');
+    if (btnDownloadRewrittenTxt) {
+        btnDownloadRewrittenTxt.addEventListener('click', function () {
+            downloadRewrittenDoc('txt');
+        });
+    }
+
     var btnBackUpload = $('btn-back-upload');
     if (btnBackUpload) btnBackUpload.addEventListener('click', function () {
-        showPanel('upload');
-        activateStep(1);
+        showPanel('upload'); activateStep(1);
     });
 
-    /* Back: rewritten → results */
     var btnBackResults = $('btn-back-results');
     if (btnBackResults) btnBackResults.addEventListener('click', function () {
-        showPanel('results');
-        activateStep(2);
+        showPanel('results'); activateStep(2);
     });
 });
