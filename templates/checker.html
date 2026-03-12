@@ -10,6 +10,21 @@
 </head>
 <body class="app-page">
 
+    <!-- ── Model loading banner ── -->
+    <div class="model-banner" id="model-banner">
+        <div class="model-banner-inner">
+            <div class="model-spinner"></div>
+            <div class="model-status-text">
+                <span id="model-banner-msg">Loading AI models… first run may take 1–2 minutes.</span>
+            </div>
+            <div class="model-indicators">
+                <span class="model-pill" id="pill-detector">⏳ Detector</span>
+                <span class="model-pill" id="pill-rewriter">⏳ Rewriter</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Navbar with step tracker ── -->
     <nav class="navbar">
         <a href="/" class="nav-logo">
             <span class="logo-mark">◈</span>
@@ -38,19 +53,22 @@
         </div>
     </nav>
 
+    <!-- ================================================================
+         MAIN CONTENT PANELS
+    ================================================================= -->
     <main class="app-main">
 
         <!-- ====== STEP 1: UPLOAD ====== -->
         <section class="panel active" id="panel-upload">
             <div class="panel-header">
                 <h2>Upload Your Document</h2>
-                <p>Supports PDF, DOCX, and TXT files up to 16MB</p>
+                <p>Supports PDF, DOCX, and TXT files up to 16 MB</p>
             </div>
 
             <div class="upload-zone" id="upload-zone">
                 <input type="file" id="file-input" accept=".pdf,.docx,.txt" hidden>
                 <div class="upload-icon">↑</div>
-                <p class="upload-title">Drag & drop your file here</p>
+                <p class="upload-title">Drag &amp; drop your file here</p>
                 <p class="upload-sub">or click to browse</p>
                 <div class="upload-types">
                     <span>PDF</span>
@@ -77,13 +95,9 @@
 
             <div class="manual-input-wrap">
                 <h3 class="section-label">— or paste text directly —</h3>
-                <textarea id="manual-text" class="manual-textarea" placeholder="Paste your document text here..."></textarea>
+                <textarea id="manual-text" class="manual-textarea"
+                    placeholder="Paste your document text here..."></textarea>
             </div>
-
-            <button class="primary-btn" id="btn-detect" disabled>
-                <span>Check Plagiarism</span>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-            </button>
         </section>
 
         <!-- ====== STEP 2: RESULTS ====== -->
@@ -96,8 +110,8 @@
             <div class="score-board">
                 <div class="score-ring-wrap">
                     <svg class="score-ring" viewBox="0 0 120 120">
-                        <circle class="ring-bg" cx="60" cy="60" r="52" />
-                        <circle class="ring-fg" id="score-ring" cx="60" cy="60" r="52" />
+                        <circle class="ring-bg" cx="60" cy="60" r="52"/>
+                        <circle class="ring-fg" id="score-ring" cx="60" cy="60" r="52"/>
                     </svg>
                     <div class="score-center">
                         <span class="score-pct" id="score-pct">0%</span>
@@ -112,7 +126,7 @@
                     </div>
                     <div class="breakdown-item">
                         <span class="bd-dot medium"></span>
-                        <span class="bd-label">Medium Risk (40-70%)</span>
+                        <span class="bd-label">Medium Risk (40–70%)</span>
                         <span class="bd-count" id="count-medium">0</span>
                     </div>
                     <div class="breakdown-item">
@@ -125,81 +139,137 @@
 
             <h3 class="section-label">Sentence Details</h3>
             <div class="sentence-list" id="sentence-list"></div>
-
-            <div class="action-row">
-                <button class="secondary-btn" id="btn-back-upload">← Back</button>
-                <button class="primary-btn" id="btn-rewrite">
-                    <span>Rewrite Content</span>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
-                </button>
-            </div>
         </section>
 
         <!-- ====== STEP 3: REWRITTEN ====== -->
         <section class="panel hidden" id="panel-rewritten">
             <div class="panel-header">
                 <h2>Rewritten Content</h2>
-                <p>Sentences above 70% similarity have been paraphrased by AI</p>
+                <p>Sentences above adaptive threshold paraphrased by AI · Non-rewritable sentences preserved</p>
             </div>
 
-            <div class="score-compare">
-                <div class="compare-item">
-                    <span class="compare-label">Before</span>
-                    <span class="compare-score danger" id="compare-before">—</span>
+            <!-- Rich stats grid -->
+            <div class="rewrite-stats">
+                <div class="stat-item">
+                    <span class="stat-label-sm">Original Score</span>
+                    <span class="stat-value" id="stat-orig">—</span>
                 </div>
-                <div class="compare-arrow">→</div>
-                <div class="compare-item">
-                    <span class="compare-label">After</span>
-                    <span class="compare-score success" id="compare-after">—</span>
+                <div class="stat-item">
+                    <span class="stat-label-sm">New Score</span>
+                    <span class="stat-value" id="stat-new">—</span>
                 </div>
-                <div class="compare-item">
-                    <span class="compare-label">Rewritten</span>
-                    <span class="compare-score neutral" id="compare-count">—</span>
+                <div class="stat-item">
+                    <span class="stat-label-sm">Reduction</span>
+                    <span class="stat-value" id="stat-reduction">—</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label-sm">Rewritten</span>
+                    <span class="stat-value" id="stat-rewritten">—</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label-sm">Total</span>
+                    <span class="stat-value" id="stat-total">—</span>
                 </div>
             </div>
 
             <h3 class="section-label">Side-by-Side Comparison</h3>
             <div class="rewrite-list" id="rewrite-list"></div>
-
-            <div class="action-row">
-                <button class="secondary-btn" id="btn-back-results">← Back</button>
-                <button class="primary-btn" id="btn-report">
-                    <span>Generate Report</span>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                </button>
-            </div>
         </section>
 
         <!-- ====== STEP 4: REPORT ====== -->
         <section class="panel hidden" id="panel-report">
             <div class="panel-header">
                 <h2>Download Report</h2>
-                <p>Export the full analysis and rewritten document</p>
+                <p>Export analysis, rewritten document, or full report</p>
             </div>
 
             <div class="report-options">
-                <div class="report-card" id="dl-pdf">
+                <div class="report-card">
                     <div class="report-icon">⬇ PDF</div>
                     <h3>PDF Report</h3>
                     <p>Complete analysis with highlighted sentences, scores, and rewritten content.</p>
                     <button class="primary-btn small" onclick="downloadReport('pdf')">Download PDF</button>
                 </div>
-                <div class="report-card" id="dl-docx">
+                <div class="report-card">
                     <div class="report-icon">⬇ DOCX</div>
-                    <h3>Word Document</h3>
+                    <h3>Word Report</h3>
                     <p>Editable DOCX with full side-by-side comparison and summary table.</p>
                     <button class="primary-btn small" onclick="downloadReport('docx')">Download DOCX</button>
                 </div>
             </div>
 
-            <div class="final-summary" id="final-summary"></div>
-
-            <div class="action-row center">
-                <button class="secondary-btn" onclick="location.reload()">Start New Analysis</button>
+            <!-- Full rewritten document download -->
+            <div class="report-card" style="margin-bottom:2rem; border-color: rgba(124,111,255,.4);">
+                <div class="report-icon">📄</div>
+                <h3>Full Rewritten Document</h3>
+                <p>Entire document with all paraphrased sentences merged — ready to submit or edit.</p>
+                <div style="display:flex;gap:.75rem;justify-content:center;flex-wrap:wrap;">
+                    <button class="success-btn" id="btn-download-rewritten" onclick="downloadRewrittenDoc('docx')">
+                        ↓ Download DOCX
+                    </button>
+                    <button class="secondary-btn" onclick="downloadRewrittenDoc('txt')"
+                        style="padding:.7rem 1.2rem;font-size:.82rem;">
+                        ↓ TXT
+                    </button>
+                </div>
             </div>
+
+            <h3 class="section-label">Analysis Summary</h3>
+            <div class="final-summary" id="final-summary"></div>
         </section>
 
-    </main>
+    </main><!-- /.app-main -->
+
+
+    <!-- ================================================================
+         STICKY ACTION BARS — one per panel, fixed bottom
+    ================================================================= -->
+
+    <!-- Bar: Upload panel -->
+    <div class="action-bar" id="bar-upload">
+        <button class="primary-btn" id="bar-btn-detect" disabled>
+            <span>Check Plagiarism</span>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="M5 12h14M12 5l7 7-7 7"/>
+            </svg>
+        </button>
+    </div>
+
+    <!-- Bar: Results panel -->
+    <div class="action-bar hidden" id="bar-results">
+        <button class="secondary-btn" id="bar-btn-back-upload">← Back</button>
+        <button class="primary-btn"   id="bar-btn-rewrite">
+            <span>Rewrite Content</span>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+                <path d="M21 3v5h-5"/>
+                <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+                <path d="M8 16H3v5"/>
+            </svg>
+        </button>
+    </div>
+
+    <!-- Bar: Rewritten panel -->
+    <div class="action-bar hidden" id="bar-rewritten">
+        <button class="secondary-btn" id="bar-btn-back-results">← Back</button>
+        <button class="secondary-btn" id="btn-download-rewritten-txt"
+            onclick="downloadRewrittenDoc('txt')">↓ TXT</button>
+        <button class="success-btn"   id="bar-btn-download-rewritten"
+            onclick="downloadRewrittenDoc('docx')">↓ Rewritten Doc</button>
+        <button class="primary-btn"   id="bar-btn-report">
+            <span>Generate Report</span>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+            </svg>
+        </button>
+    </div>
+
+    <!-- Bar: Report panel -->
+    <div class="action-bar hidden" id="bar-report">
+        <button class="secondary-btn" onclick="location.reload()">↩ New Analysis</button>
+    </div>
+
 
     <!-- Loading overlay -->
     <div class="loading-overlay hidden" id="loading-overlay">
@@ -209,7 +279,7 @@
         </div>
     </div>
 
-    <!-- Toast notification -->
+    <!-- Toast -->
     <div class="toast hidden" id="toast"></div>
 
     <script src="/static/js/script.js"></script>
