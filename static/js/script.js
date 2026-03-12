@@ -135,13 +135,19 @@ var _modelsReady = false;
                         if (banner) banner.classList.add('hidden');
                     }, 2000);
                 } else {
+                    var hasError = d.detector_status === 'error' || d.rewriter_status === 'error';
                     var msgs = [];
                     if (d.detector_status === 'loading') msgs.push('Loading detector...');
                     if (d.rewriter_status === 'loading') msgs.push('Loading rewriter (flan-t5-large)...');
-                    if (d.detector_status === 'error')   msgs.push('Detector error: ' + d.detector_error);
-                    if (d.rewriter_status === 'error')   msgs.push('Rewriter error: ' + d.rewriter_error);
+                    if (d.detector_status === 'error')   msgs.push('⚠ Detector error: ' + d.detector_error);
+                    if (d.rewriter_status === 'error')   msgs.push('⚠ Rewriter error: ' + d.rewriter_error);
                     if (bannerMsg) bannerMsg.textContent = msgs.join('  ·  ') || 'Loading models...';
-                    setTimeout(poll, 2500);
+                    if (hasError && banner) {
+                        banner.style.borderColor = 'var(--high)';
+                        banner.style.background  = 'linear-gradient(90deg, #1f0a0a, #1a1010)';
+                    }
+                    // Keep polling even on error in case server restarts / model retries
+                    setTimeout(poll, hasError ? 8000 : 2500);
                 }
             })
             .catch(function () { setTimeout(poll, 3000); });
