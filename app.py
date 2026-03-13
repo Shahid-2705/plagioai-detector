@@ -1,22 +1,25 @@
 """
-PlagioAI — app.py
+PlagioAI — app.py  (Production build)
 
-Key changes in this revision
-─────────────────────────────
-  - /status now returns 'error' immediately when loading thread fails,
-    not 'loading' forever.  Frontend can show the real error message.
-  - _load_detector / _load_rewriter set status='error' + full traceback
-    so the banner tells the user exactly what went wrong.
-  - Detector falls back gracefully when the heavy model download times out
-    (similarity_engine tries all-mpnet-base-v2 first, then all-MiniLM-L6-v2).
-  - /detect and /rewrite return 503 with the actual error string on failure.
-  - Adaptive thresholding (< 8 words: 0.40, 8-20: 0.55, > 20: 0.70).
-  - POST /download_rewritten returns full rewritten doc as DOCX or TXT.
+Deployment:
+  Frontend → Vercel
+  Backend  → Render  (https://plagioai-detector.onrender.com)
+  Session  → in-memory dict (no filesystem dependency on Render free tier)
+
+Design decisions:
+  - Models loaded ONCE at module import in background threads (never per-request)
+  - CORS allows any origin so Vercel frontend can call Render backend
+  - Session replaced with a simple in-memory dict keyed by session_id cookie
+    (avoids flask-session filesystem writes on read-only Render containers)
+  - /status returns granular sub-status so the banner shows download progress
+  - Adaptive thresholding: < 8 words → 0.40, 8-20 → 0.55, > 20 → 0.70
+  - /download_rewritten returns full merged doc as DOCX or TXT
 """
 
 import os
 import re
 import uuid
+import time
 import tempfile
 import warnings
 import threading
@@ -26,69 +29,99 @@ import logging
 warnings.filterwarnings('ignore', message='.*sequentially on GPU.*', category=UserWarning)
 logging.basicConfig(level=logging.INFO)
 
-from flask import Flask, render_template, request, jsonify, send_file, session
+from flask import Flask, request, jsonify, send_file, make_response
 from flask_cors import CORS
-from flask_session import Session
-from werkzeug.utils import secure_filename
 
-from core.file_parser          import extract_text_from_file
-from core.text_preprocessor    import segment_sentences
-from core.plagiarism_detector   import PlagiarismDetector
-from core.rewrite_engine        import RewriteEngine
-from core.report_generator      import generate_report
+from core.file_parser         import extract_text_from_file
+from core.text_preprocessor   import segment_sentences
+from core.plagiarism_detector  import PlagiarismDetector
+from core.rewrite_engine       import RewriteEngine
+from core.report_generator     import generate_report
 
-# ── GPU info printout ──────────────────────────────────────────────────────────
+# ── Detect GPU ────────────────────────────────────────────────────────────────
 try:
     import torch
-    if torch.cuda.is_available():
-        print(f'[PlagioAI] Running on: CUDA — {torch.cuda.get_device_name(0)}')
-    else:
-        print('[PlagioAI] Running on: CPU')
+    _GPU = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'
+    print(f'[PlagioAI] Device: {_GPU}')
 except Exception:
-    print('[PlagioAI] Running on: CPU (torch unavailable)')
+    _GPU = 'CPU'
+    print('[PlagioAI] Device: CPU')
 
-# ── Flask setup ────────────────────────────────────────────────────────────────
+# ── Flask + CORS ───────────────────────────────────────────────────────────────
 app = Flask(__name__)
-app.secret_key = os.urandom(24)
+app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
 
-_BASE_DIR    = os.path.dirname(__file__)
-_SESSION_DIR = os.path.join(_BASE_DIR, 'flask_sessions')
-_UPLOAD_DIR  = os.path.join(_BASE_DIR, 'uploads')
-os.makedirs(_SESSION_DIR, exist_ok=True)
-os.makedirs(_UPLOAD_DIR,  exist_ok=True)
+# Allow any origin (Vercel preview URLs change per deploy)
+CORS(app,
+     supports_credentials=True,
+     origins='*',
+     allow_headers=['Content-Type', 'Authorization'],
+     methods=['GET', 'POST', 'OPTIONS'])
 
-app.config.update(
-    SESSION_TYPE            = 'filesystem',
-    SESSION_FILE_DIR        = _SESSION_DIR,
-    SESSION_PERMANENT       = False,
-    SESSION_USE_SIGNER      = True,
-    SESSION_COOKIE_SAMESITE = 'Lax',
-    SESSION_COOKIE_SECURE   = False,
-    UPLOAD_FOLDER           = _UPLOAD_DIR,
-    MAX_CONTENT_LENGTH      = 16 * 1024 * 1024,
-)
-
-Session(app)
-CORS(app, supports_credentials=True)
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {'pdf', 'docx', 'txt'}
 
-# ── Non-rewritable sentence patterns ──────────────────────────────────────────
+# ── In-memory session store ────────────────────────────────────────────────────
+# Keyed by a UUID stored in the 'sid' cookie.
+# Each entry: { 'original_text': str, 'sentences': list,
+#               'detection_results': dict, 'rewritten_sentences': list,
+#               'new_score': float, 'ts': float }
+_SESSIONS: dict = {}
+_SESSION_TTL    = 3600   # seconds before a session is evicted
+
+def _gc_sessions():
+    """Remove sessions older than TTL."""
+    cutoff = time.time() - _SESSION_TTL
+    dead   = [k for k, v in _SESSIONS.items() if v.get('ts', 0) < cutoff]
+    for k in dead:
+        _SESSIONS.pop(k, None)
+
+def _get_sid():
+    """Return existing sid from cookie, or create a new one."""
+    return request.cookies.get('sid')
+
+def _get_session() -> dict:
+    sid = _get_sid()
+    if sid and sid in _SESSIONS:
+        _SESSIONS[sid]['ts'] = time.time()
+        return _SESSIONS[sid]
+    return {}
+
+def _save_session(data: dict):
+    """Persist data into the session, creating it if needed."""
+    sid = _get_sid()
+    if not sid or sid not in _SESSIONS:
+        sid = str(uuid.uuid4())
+    _SESSIONS.setdefault(sid, {})
+    _SESSIONS[sid].update(data)
+    _SESSIONS[sid]['ts'] = time.time()
+    _gc_sessions()
+    return sid
+
+def _set_sid_cookie(response, sid: str):
+    response.set_cookie(
+        'sid', sid,
+        max_age=_SESSION_TTL,
+        samesite='None',
+        secure=True,      # required for cross-site cookies on HTTPS
+        httponly=True,
+    )
+    return response
+
+# ── Skip / threshold helpers ───────────────────────────────────────────────────
 _SKIP_PAT = re.compile(
     r'\b(figure|fig\.|table|tbl\.|references?|bibliography|doi|et\s+al\.?'
     r'|journal|proc\.|proceedings|vol\.|pp\.|isbn|issn|rrn|dept|course\s+code'
     r'|http|https|www\.)\b|10\.\d{4,}|https?://',
     re.IGNORECASE,
 )
-_NUMS_ONLY = re.compile(
-    r'^[\d\s\.\,\:\;\-\+\%\(\)\/\=\u00b0\u03bc\u00b1\u00d7\u00f7]+$'
-)
-
+_NUMS_ONLY = re.compile(r'^[\d\s\.\,\:\;\-\+\%\(\)\/\=\u00b0\u03bc\u00b1\u00d7\u00f7]+$')
 
 def _is_non_rewritable(s: str) -> bool:
     s = s.strip()
     return len(s) < 20 or bool(_SKIP_PAT.search(s)) or bool(_NUMS_ONLY.match(s))
-
 
 def _adaptive_threshold(s: str) -> float:
     wc = len(s.split())
@@ -96,121 +129,125 @@ def _adaptive_threshold(s: str) -> float:
     if wc <= 20: return 0.55
     return 0.70
 
-
 # ── Model registry ─────────────────────────────────────────────────────────────
 _models: dict = {
     'detector':        None,
     'rewriter':        None,
     'detector_ready':  False,
     'rewriter_ready':  False,
-    'detector_status': 'loading',   # loading | ready | error
+    'detector_status': 'loading',
     'rewriter_status': 'loading',
+    'detector_sub':    'Starting...',
+    'rewriter_sub':    'Starting...',
     'detector_error':  '',
     'rewriter_error':  '',
 }
 _lock = threading.Lock()
 
+def _set(key, val):
+    with _lock:
+        _models[key] = val
 
+# ── Background loader: detector ────────────────────────────────────────────────
 def _load_detector():
-    """Background thread: load the plagiarism detector model."""
     try:
+        _set('detector_sub', 'Importing libraries...')
+        _set('detector_sub', 'Loading embedding model (first run ~90-420 MB)...')
         d = PlagiarismDetector()
-        d.engine.compute_embeddings(['warmup'])        # forces model download now
-        model_name = d.engine._loaded_model_name or 'embedding model'
+        _set('detector_sub', 'Warming up...')
+        d.engine.compute_embeddings(['warmup'])
+        model_name = getattr(d.engine, '_loaded_model_name', 'embedding model')
         with _lock:
             _models['detector']        = d
             _models['detector_ready']  = True
             _models['detector_status'] = 'ready'
-        print(f'[PlagioAI] Detector ready ({model_name})')
+            _models['detector_sub']    = f'Ready ({model_name})'
+        print(f'[PlagioAI] Detector ready — {model_name}')
     except Exception:
         err = traceback.format_exc()
+        short = err.strip().splitlines()[-1]
         with _lock:
             _models['detector_status'] = 'error'
-            _models['detector_error']  = err.strip().splitlines()[-1]  # last line is most informative
+            _models['detector_sub']    = short
+            _models['detector_error']  = err
         print(f'[PlagioAI] Detector FAILED:\n{err}')
 
-
+# ── Background loader: rewriter ────────────────────────────────────────────────
 def _load_rewriter():
-    """Background thread: load the rewriter model."""
     try:
+        _set('rewriter_sub', 'Importing libraries...')
+        _set('rewriter_sub', 'Loading flan-t5-large (first run ~1 GB)...')
         r = RewriteEngine()
-        r.rewrite('Warm-up sentence for the paraphrase model.')
+        _set('rewriter_sub', 'Warming up rewriter...')
+        r.rewrite('Warm-up sentence.')
         with _lock:
             _models['rewriter']        = r
             _models['rewriter_ready']  = True
             _models['rewriter_status'] = 'ready'
-        print('[PlagioAI] Rewriter ready (flan-t5-large)')
+            _models['rewriter_sub']    = 'Ready (flan-t5-large)'
+        print('[PlagioAI] Rewriter ready')
     except Exception:
         err = traceback.format_exc()
+        short = err.strip().splitlines()[-1]
         with _lock:
             _models['rewriter_status'] = 'error'
-            _models['rewriter_error']  = err.strip().splitlines()[-1]
+            _models['rewriter_sub']    = short
+            _models['rewriter_error']  = err
         print(f'[PlagioAI] Rewriter FAILED:\n{err}')
 
-
-print('[PlagioAI] Pre-loading models in background...')
+print('[PlagioAI] Spawning model-load threads...')
 threading.Thread(target=_load_detector, daemon=True).start()
 threading.Thread(target=_load_rewriter, daemon=True).start()
 
-
-def get_detector():
-    with _lock:
-        return _models['detector']
-
-def get_rewriter():
-    with _lock:
-        return _models['rewriter']
+def get_detector(): return _models.get('detector')
+def get_rewriter():  return _models.get('rewriter')
 
 def allowed_file(fn: str) -> bool:
     return '.' in fn and fn.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-
 # ── Document helpers ───────────────────────────────────────────────────────────
-
-def _build_rewritten_text(rewritten_sentences: list) -> str:
+def _build_rewritten_text(rows: list) -> str:
     return ' '.join(
-        (s.get('rewritten') or s.get('original') or '').strip()
-        for s in rewritten_sentences
-        if (s.get('rewritten') or s.get('original') or '').strip()
+        (r.get('rewritten') or r.get('original') or '').strip()
+        for r in rows
+        if (r.get('rewritten') or r.get('original') or '').strip()
     )
 
-
-def _save_rewritten_docx(text: str, filepath: str):
+def _save_rewritten_docx(text: str, path: str):
     from docx import Document
     doc = Document()
     doc.add_heading('Rewritten Document', 0)
-    doc.add_paragraph('Generated by PlagioAI — AI Plagiarism Detector & Rewriter')
+    doc.add_paragraph('Generated by PlagioAI')
     doc.add_paragraph('')
-    for para in (text.split('\n\n') if '\n\n' in text else [text]):
-        if para.strip():
-            doc.add_paragraph(para.strip())
-    doc.save(filepath)
+    for p in (text.split('\n\n') if '\n\n' in text else [text]):
+        if p.strip():
+            doc.add_paragraph(p.strip())
+    doc.save(path)
 
+# ── Health check / status ──────────────────────────────────────────────────────
 
-# ── Routes ─────────────────────────────────────────────────────────────────────
-
+@app.route('/health')
 @app.route('/')
-def index():
-    return render_template('index.html')
-
-
-@app.route('/checker')
-def checker():
-    return render_template('checker.html')
+def health():
+    """Render pings / for health checks."""
+    return jsonify({'status': 'running', 'gpu': _GPU})
 
 
 @app.route('/status')
 def model_status():
     """
-    Polled every 2.5 s by the frontend.
-    Returns the real status of both models including any error message.
+    Polled every 2 s by the frontend.
+    Returns per-model status + sub-status message for live banner updates.
     """
     with _lock:
-        ds = _models['detector_status']
-        rs = _models['rewriter_status']
+        ds  = _models['detector_status']
+        rs  = _models['rewriter_status']
         return jsonify({
+            'status':          'running',
             'detector_status': ds,
             'rewriter_status': rs,
+            'detector_sub':    _models['detector_sub'],
+            'rewriter_sub':    _models['rewriter_sub'],
             'detector_error':  _models['detector_error'],
             'rewriter_error':  _models['rewriter_error'],
             'all_ready':       ds == 'ready' and rs == 'ready',
@@ -218,52 +255,40 @@ def model_status():
         })
 
 
-
 @app.route('/debug')
 def debug_info():
-    """Diagnostic page — shows model load status + last error in browser."""
+    """Open /debug in browser to see exact error details."""
     with _lock:
-        ds   = _models['detector_status']
-        rs   = _models['rewriter_status']
-        derr = _models['detector_error']
-        rerr = _models['rewriter_error']
+        lines = [
+            f"detector_status : {_models['detector_status']}",
+            f"detector_sub    : {_models['detector_sub']}",
+            f"rewriter_status : {_models['rewriter_status']}",
+            f"rewriter_sub    : {_models['rewriter_sub']}",
+            f"device          : {_GPU}",
+        ]
+        de  = _models['detector_error']
+        re_ = _models['rewriter_error']
 
-    try:
-        import torch
-        gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU only'
-    except Exception as e:
-        gpu = f'torch error: {e}'
+    for pkg in ('sentence_transformers', 'transformers', 'torch'):
+        try:
+            m = __import__(pkg)
+            lines.append(f'{pkg:30s}: {m.__version__}')
+        except Exception as e:
+            lines.append(f'{pkg:30s}: NOT FOUND ({e})')
 
-    try:
-        import sentence_transformers
-        st_version = sentence_transformers.__version__
-    except Exception:
-        st_version = 'NOT INSTALLED'
-
-    try:
-        import transformers
-        tr_version = transformers.__version__
-    except Exception:
-        tr_version = 'NOT INSTALLED'
-
-    lines = [
-        f'detector_status : {ds}',
-        f'rewriter_status : {rs}',
-        f'GPU             : {gpu}',
-        f'sentence-transformers: {st_version}',
-        f'transformers    : {tr_version}',
-        '',
-        '--- Detector error (if any) ---',
-        derr or '(none)',
-        '',
-        '--- Rewriter error (if any) ---',
-        rerr or '(none)',
-    ]
-    return '<pre style="font-family:monospace;padding:2rem;">' + '\n'.join(lines) + '</pre>'
+    lines += ['', '=== Detector error ===', de or '(none)',
+              '', '=== Rewriter error ===', re_ or '(none)']
+    return '<pre style="font:14px monospace;padding:2rem;background:#111;color:#eee;">' \
+           + '\n'.join(lines) + '</pre>'
 
 
-@app.route('/upload', methods=['POST'])
+# ── Upload ─────────────────────────────────────────────────────────────────────
+
+@app.route('/upload', methods=['POST', 'OPTIONS'])
 def upload_file():
+    if request.method == 'OPTIONS':
+        return _cors_preflight()
+
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
     file = request.files['file']
@@ -272,81 +297,97 @@ def upload_file():
     if not allowed_file(file.filename):
         return jsonify({'error': 'Unsupported file type. Use PDF, DOCX, or TXT.'}), 400
 
-    filename  = secure_filename(file.filename)
-    filepath  = os.path.join(app.config['UPLOAD_FOLDER'], f'{uuid.uuid4()}_{filename}')
-    file.save(filepath)
+    from werkzeug.utils import secure_filename
+    fn   = secure_filename(file.filename)
+    path = os.path.join(UPLOAD_DIR, f'{uuid.uuid4()}_{fn}')
+    file.save(path)
 
     try:
-        text = extract_text_from_file(filepath)
+        text = extract_text_from_file(path)
         if not text or len(text.strip()) < 50:
-            return jsonify({'error': 'Could not extract enough text from the file.'}), 400
-        session['original_text'] = text
-        return jsonify({
+            return jsonify({'error': 'Could not extract enough text.'}), 400
+
+        sid = _save_session({'original_text': text})
+        resp = make_response(jsonify({
             'success':    True,
             'full_text':  text,
             'preview':    text[:500] + '...' if len(text) > 500 else text,
             'word_count': len(text.split()),
             'char_count': len(text),
-            'filename':   filename,
-        })
+            'filename':   fn,
+        }))
+        return _set_sid_cookie(resp, sid)
+
     except Exception as e:
         return jsonify({'error': f'Error processing file: {e}'}), 500
 
 
-@app.route('/detect', methods=['POST'])
+# ── Detect ─────────────────────────────────────────────────────────────────────
+
+@app.route('/detect', methods=['POST', 'OPTIONS'])
 def detect_plagiarism():
+    if request.method == 'OPTIONS':
+        return _cors_preflight()
+
     detector = get_detector()
     if detector is None:
         with _lock:
-            status = _models['detector_status']
-            err    = _models['detector_error']
-        if status == 'error':
-            return jsonify({'error': f'Detector failed to load: {err}'}), 503
-        return jsonify({'error': 'Detector model is still loading — please wait and try again.'}), 503
+            st  = _models['detector_status']
+            sub = _models['detector_sub']
+            err = _models['detector_error']
+        if st == 'error':
+            return jsonify({'error': f'Detector failed: {err.strip().splitlines()[-1]}'}), 503
+        return jsonify({'error': f'Detector loading: {sub}'}), 503
 
-    body = request.get_json(silent=True) or {}
-    text = (body.get('text') or '').strip() or (session.get('original_text') or '').strip()
+    body    = request.get_json(silent=True) or {}
+    sess    = _get_session()
+    text    = (body.get('text') or '').strip() or (sess.get('original_text') or '').strip()
     if not text:
         return jsonify({'error': 'No text to analyse. Upload or paste text first.'}), 400
 
     try:
         sentences = segment_sentences(text)
         if len(sentences) < 2:
-            return jsonify({'error': 'Need at least 2 sentences for analysis.'}), 400
+            return jsonify({'error': 'Need at least 2 sentences.'}), 400
 
         results = detector.analyze(sentences)
-        session['sentences']         = sentences
-        session['detection_results'] = results
-
-        return jsonify({
+        sid     = _save_session({'sentences': sentences, 'detection_results': results})
+        resp    = make_response(jsonify({
             'success':           True,
             'sentences':         sentences,
             'results':           results['sentence_scores'],
             'overall_score':     results['overall_score'],
             'high_risk_count':   results['high_risk_count'],
             'medium_risk_count': results['medium_risk_count'],
-        })
+        }))
+        return _set_sid_cookie(resp, sid)
+
     except Exception as e:
         return jsonify({'error': f'Detection error: {e}'}), 500
 
 
-@app.route('/rewrite', methods=['POST'])
+# ── Rewrite ────────────────────────────────────────────────────────────────────
+
+@app.route('/rewrite', methods=['POST', 'OPTIONS'])
 def rewrite_content():
+    if request.method == 'OPTIONS':
+        return _cors_preflight()
+
     rewriter = get_rewriter()
     if rewriter is None:
         with _lock:
-            status = _models['rewriter_status']
-            err    = _models['rewriter_error']
-        if status == 'error':
-            return jsonify({'error': f'Rewriter failed to load: {err}'}), 503
-        return jsonify({'error': 'Rewrite model is still loading — please wait and try again.'}), 503
+            st  = _models['rewriter_status']
+            sub = _models['rewriter_sub']
+            err = _models['rewriter_error']
+        if st == 'error':
+            return jsonify({'error': f'Rewriter failed: {err.strip().splitlines()[-1]}'}), 503
+        return jsonify({'error': f'Rewriter loading: {sub}'}), 503
 
-    body      = request.get_json(silent=True) or {}
-    sentences = body.get('sentences') or session.get('sentences', [])
-    if not sentences:
-        return jsonify({'error': 'No sentences found. Run detection first.'}), 400
+    body = request.get_json(silent=True) or {}
+    sess = _get_session()
 
-    stored      = session.get('detection_results', {})
+    sentences   = body.get('sentences')   or sess.get('sentences', [])
+    stored      = sess.get('detection_results', {})
     sent_scores = stored.get('sentence_scores', [])
     overall_in  = float(stored.get('overall_score', 0))
 
@@ -355,128 +396,144 @@ def rewrite_content():
         sent_scores = raw.get('sentence_scores', [])
         overall_in  = float(raw.get('overall_score', overall_in))
 
+    if not sentences:
+        return jsonify({'error': 'No sentences found. Run detection first.'}), 400
+
     try:
-        scores_list = [
+        scores = [
             float((sent_scores[i] if i < len(sent_scores) else {}).get('combined_score', 0))
             for i in range(len(sentences))
         ]
 
-        flagged_idx   = []
-        flagged_sents = []
-        thresholds    = []
-
-        for i, sentence in enumerate(sentences):
-            score     = scores_list[i]
-            threshold = _adaptive_threshold(sentence)
-            thresholds.append(threshold)
-            if score >= threshold and not _is_non_rewritable(sentence):
+        flagged_idx, flagged_sents, thresholds = [], [], []
+        for i, s in enumerate(sentences):
+            thr = _adaptive_threshold(s)
+            thresholds.append(thr)
+            if scores[i] >= thr and not _is_non_rewritable(s):
                 flagged_idx.append(i)
-                flagged_sents.append(sentence)
+                flagged_sents.append(s)
 
         batch_out   = rewriter.rewrite_batch(flagged_sents) if flagged_sents else []
         rewrite_map = dict(zip(flagged_idx, batch_out))
 
-        rewritten_sentences = []
-        for i, sentence in enumerate(sentences):
-            rewritten_text     = rewrite_map.get(i, sentence)
-            actually_rewritten = (
-                i in rewrite_map
-                and rewritten_text.strip().lower() != sentence.strip().lower()
-                and len(rewritten_text.strip()) > 10
-            )
-            rewritten_sentences.append({
-                'original':       sentence,
-                'rewritten':      rewritten_text if actually_rewritten else sentence,
-                'was_rewritten':  actually_rewritten,
-                'original_score': scores_list[i],
+        rows = []
+        for i, s in enumerate(sentences):
+            rt = rewrite_map.get(i, s)
+            rw = (i in rewrite_map
+                  and rt.strip().lower() != s.strip().lower()
+                  and len(rt.strip()) > 10)
+            rows.append({
+                'original':       s,
+                'rewritten':      rt if rw else s,
+                'was_rewritten':  rw,
+                'original_score': scores[i],
                 'threshold_used': thresholds[i],
-                'non_rewritable': _is_non_rewritable(sentence),
+                'non_rewritable': _is_non_rewritable(s),
             })
 
-        new_text    = _build_rewritten_text(rewritten_sentences)
+        new_text    = _build_rewritten_text(rows)
         new_sents   = segment_sentences(new_text)
         det         = get_detector()
-        new_results = det.analyze(new_sents) if det and len(new_sents) >= 2 else {'overall_score': 0}
-        new_score   = new_results.get('overall_score', 0)
+        new_res     = det.analyze(new_sents) if det and len(new_sents) >= 2 else {'overall_score': 0}
+        new_score   = new_res.get('overall_score', 0)
 
-        session['rewritten_sentences'] = rewritten_sentences
-        session['new_score']           = new_score
-
-        rewritten_count = sum(1 for s in rewritten_sentences if s['was_rewritten'])
-        skipped_count   = sum(1 for s in rewritten_sentences
-                              if s['non_rewritable'] and s['original_score'] >= s['threshold_used'])
-
-        return jsonify({
+        sid  = _save_session({'rewritten_sentences': rows, 'new_score': new_score})
+        resp = make_response(jsonify({
             'success':             True,
-            'rewritten_sentences': rewritten_sentences,
+            'rewritten_sentences': rows,
             'original_score':      overall_in,
             'new_score':           new_score,
-            'rewritten_count':     rewritten_count,
-            'skipped_count':       skipped_count,
+            'rewritten_count':     sum(1 for r in rows if r['was_rewritten']),
+            'skipped_count':       sum(1 for r in rows if r['non_rewritable'] and r['original_score'] >= r['threshold_used']),
             'total_sentences':     len(sentences),
             'score_reduction':     round(overall_in - new_score, 2),
-        })
+        }))
+        return _set_sid_cookie(resp, sid)
+
     except Exception as e:
         return jsonify({'error': f'Rewriting error: {e}'}), 500
 
 
-@app.route('/download_rewritten', methods=['POST'])
+# ── Download rewritten document ────────────────────────────────────────────────
+
+@app.route('/download_rewritten', methods=['POST', 'OPTIONS'])
 def download_rewritten():
+    """
+    POST /download_rewritten
+    Body: { "format": "docx" | "txt" }
+    Returns the full merged rewritten document as a downloadable file.
+    """
+    if request.method == 'OPTIONS':
+        return _cors_preflight()
+
     body = request.get_json(silent=True) or {}
     fmt  = body.get('format', 'docx').lower()
+    sess = _get_session()
+    rows = sess.get('rewritten_sentences', [])
 
-    rewritten_sentences = session.get('rewritten_sentences', [])
-    if not rewritten_sentences:
+    if not rows:
         return jsonify({'error': 'No rewritten document. Complete the rewrite step first.'}), 400
 
-    full_text = _build_rewritten_text(rewritten_sentences)
-    tmp_id    = uuid.uuid4()
+    full = _build_rewritten_text(rows)
+    tid  = uuid.uuid4()
 
     try:
         if fmt == 'docx':
-            filepath = os.path.join(tempfile.gettempdir(), f'rewritten_{tmp_id}.docx')
-            _save_rewritten_docx(full_text, filepath)
-            name     = 'rewritten_document.docx'
-            mime     = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+            fp   = os.path.join(tempfile.gettempdir(), f'rw_{tid}.docx')
+            _save_rewritten_docx(full, fp)
+            name = 'rewritten_document.docx'
+            mime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
         else:
-            filepath = os.path.join(tempfile.gettempdir(), f'rewritten_{tmp_id}.txt')
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write('REWRITTEN DOCUMENT\nGenerated by PlagioAI\n' + '=' * 60 + '\n\n')
-                f.write(full_text)
+            fp   = os.path.join(tempfile.gettempdir(), f'rw_{tid}.txt')
+            with open(fp, 'w', encoding='utf-8') as f:
+                f.write('REWRITTEN DOCUMENT\nGenerated by PlagioAI\n' + '=' * 60 + '\n\n' + full)
             name = 'rewritten_document.txt'
             mime = 'text/plain'
 
-        return send_file(filepath, as_attachment=True, download_name=name, mimetype=mime)
+        return send_file(fp, as_attachment=True, download_name=name, mimetype=mime)
+
     except Exception as e:
         return jsonify({'error': f'Download error: {e}'}), 500
 
 
-@app.route('/report', methods=['POST'])
+# ── Report ─────────────────────────────────────────────────────────────────────
+
+@app.route('/report', methods=['POST', 'OPTIONS'])
 def download_report():
+    if request.method == 'OPTIONS':
+        return _cors_preflight()
+
     body        = request.get_json(silent=True) or {}
     format_type = body.get('format', 'pdf')
     orig_score  = float(body.get('original_score', 0))
+    sess        = _get_session()
+    rows        = sess.get('rewritten_sentences', [])
+    new_score   = float(sess.get('new_score', 0))
 
-    rewritten_sentences = session.get('rewritten_sentences', [])
-    new_score           = float(session.get('new_score', 0))
-
-    if not rewritten_sentences:
-        return jsonify({'error': 'No report data — complete the rewrite step first.'}), 400
+    if not rows:
+        return jsonify({'error': 'No data. Complete the rewrite step first.'}), 400
 
     try:
-        filepath = generate_report(rewritten_sentences, orig_score, new_score, format_type)
-        return send_file(filepath, as_attachment=True,
+        fp = generate_report(rows, orig_score, new_score, format_type)
+        return send_file(fp, as_attachment=True,
                          download_name=f'plagiarism_report.{format_type}')
     except Exception as e:
         return jsonify({'error': f'Report error: {e}'}), 500
 
 
+# ── CORS preflight helper ──────────────────────────────────────────────────────
+
+def _cors_preflight():
+    resp = make_response('', 204)
+    resp.headers['Access-Control-Allow-Origin']      = request.headers.get('Origin', '*')
+    resp.headers['Access-Control-Allow-Credentials'] = 'true'
+    resp.headers['Access-Control-Allow-Headers']     = 'Content-Type, Authorization'
+    resp.headers['Access-Control-Allow-Methods']     = 'GET, POST, OPTIONS'
+    return resp
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
+
 if __name__ == '__main__':
-    app.run(
-        debug=True, host='0.0.0.0', port=5000,
-        exclude_patterns=[
-            '*site-packages*', '*torch*',
-            '*transformers*',  '*sentence_transformers*',
-        ],
-    )
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
