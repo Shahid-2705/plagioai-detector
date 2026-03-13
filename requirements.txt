@@ -25,3 +25,7 @@ reportlab>=4.1.0
 
 # Utilities
 numpy>=1.26.0
+supabase
+flask-session
+pypdf
+gunicorn
