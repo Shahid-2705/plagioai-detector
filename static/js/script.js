@@ -1,14 +1,17 @@
 'use strict';
 
 /* =====================================================================
-   PlagioAI — script.js  (Advanced Edition v3)
-
-   Fixes in this version:
-     1. Adaptive threshold rewriting (handled server-side, reflected in UI)
-     2. Sticky action bar — always visible regardless of scroll position
-     3. Rich rewrite summary: Original / New / Reduction / Rewritten / Total
-     4. Download Full Rewritten Document (DOCX + TXT)
+   PlagioAI — script.js
+   Deployment-aware: auto-switches between local dev and Render backend
 ===================================================================== */
+
+/* ── API base URL ────────────────────────────────────────────────────
+   On localhost  → hit the local Flask dev server
+   Everywhere else → hit the Render production backend              */
+const API_BASE =
+    window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+        ? 'http://127.0.0.1:5000'
+        : 'https://plagioai-detector.onrender.com';
 
 /* ── State ─────────────────────────────────────────────────────────── */
 var state = {
@@ -94,8 +97,6 @@ function showPanel(name) {
         target.classList.add('active');
         window.scrollTo({ top: 0, behavior: 'smooth' });
     }
-
-    // Show/hide the correct sticky action bar
     ['bar-upload', 'bar-results', 'bar-rewritten', 'bar-report'].forEach(function (id) {
         var bar = $(id);
         if (bar) bar.classList.add('hidden');
@@ -118,37 +119,44 @@ var _modelsReady = false;
     }
 
     function poll() {
-        fetch('/status', { credentials: 'include' })
+        fetch(API_BASE + '/status', { credentials: 'include' })
             .then(function (r) { return r.json(); })
             .then(function (d) {
-                updatePill('pill-detector', d.detector_status, 'Detector');
-                updatePill('pill-rewriter', d.rewriter_status, 'Rewriter');
+                updatePill('pill-detector', d.detector_status || 'ready', 'Detector');
+                updatePill('pill-rewriter', d.rewriter_status || 'ready', 'Rewriter');
 
                 var banner    = $('model-banner');
                 var bannerMsg = $('model-banner-msg');
 
-                if (d.all_ready) {
+                if (d.all_ready || d.ready) {
                     _modelsReady = true;
                     if (bannerMsg) bannerMsg.textContent = '✓ All models ready — GPU accelerated.';
-                    if (banner)    banner.classList.add('ready');
+                    if (banner) banner.classList.add('ready');
                     setTimeout(function () {
                         if (banner) banner.classList.add('hidden');
                     }, 2000);
-                } else {
-                    var hasError = d.detector_status === 'error' || d.rewriter_status === 'error';
-                    var msgs = [];
-                    if (d.detector_status === 'loading') msgs.push('Loading detector...');
-                    if (d.rewriter_status === 'loading') msgs.push('Loading rewriter (flan-t5-large)...');
-                    if (d.detector_status === 'error')   msgs.push('⚠ Detector error: ' + d.detector_error);
-                    if (d.rewriter_status === 'error')   msgs.push('⚠ Rewriter error: ' + d.rewriter_error);
-                    if (bannerMsg) bannerMsg.textContent = msgs.join('  ·  ') || 'Loading models...';
-                    if (hasError && banner) {
-                        banner.style.borderColor = 'var(--high)';
-                        banner.style.background  = 'linear-gradient(90deg, #1f0a0a, #1a1010)';
-                    }
-                    // Keep polling even on error in case server restarts / model retries
-                    setTimeout(poll, hasError ? 8000 : 2500);
+                    return;
                 }
+
+                var hasError = d.detector_status === 'error' || d.rewriter_status === 'error';
+                var lines = [];
+                if (d.detector_status && d.detector_status !== 'ready') {
+                    var dIcon = d.detector_status === 'error' ? '✗' : '⟳';
+                    lines.push(dIcon + ' Detector: ' + (d.detector_sub || d.detector_status));
+                }
+                if (d.rewriter_status && d.rewriter_status !== 'ready') {
+                    var rIcon = d.rewriter_status === 'error' ? '✗' : '⟳';
+                    lines.push(rIcon + ' Rewriter: ' + (d.rewriter_sub || d.rewriter_status));
+                }
+                if (lines.length === 0) lines.push('Loading models...');
+                if (bannerMsg) bannerMsg.textContent = lines.join('   ·   ');
+
+                if (hasError && banner) {
+                    banner.style.borderBottomColor = 'var(--high)';
+                    banner.style.background = 'linear-gradient(90deg, #1f0a0a, #1a1010)';
+                }
+
+                setTimeout(poll, hasError ? 6000 : 2000);
             })
             .catch(function () { setTimeout(poll, 3000); });
     }
@@ -163,7 +171,6 @@ function initUploadZone() {
     if (!zone || !input) return;
 
     zone.addEventListener('click', function () { input.click(); });
-
     zone.addEventListener('dragover', function (e) {
         e.preventDefault();
         zone.classList.add('drag-over');
@@ -217,7 +224,9 @@ async function handleFileSelected(file) {
     formData.append('file', file);
 
     try {
-        var res  = await fetch('/upload', { method: 'POST', body: formData, credentials: 'include' });
+        var res  = await fetch(API_BASE + '/upload', {
+            method: 'POST', body: formData, credentials: 'include'
+        });
         var data = await res.json();
         hideLoading();
         if (!res.ok || data.error) { showToast(data.error || 'Upload failed', 'error'); return; }
@@ -265,8 +274,8 @@ async function runDetection() {
         : 'Loading detector + analysing... first run takes 30-60 s.');
 
     try {
-        var res  = await fetch('/detect', {
-            method: 'POST',
+        var res = await fetch(API_BASE + '/detect', {
+            method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
             body: JSON.stringify({ text: text })
@@ -351,7 +360,7 @@ async function runRewrite() {
         : 'Loading rewriter + rewriting... first run takes 60-120 s.');
 
     try {
-        var res = await fetch('/rewrite', {
+        var res = await fetch(API_BASE + '/rewrite', {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
@@ -362,7 +371,6 @@ async function runRewrite() {
                                      state.detectionResults.sentence_scores || [],
                     overall_score:   state.detectionResults.overall_score || 0
                 }
-                // No threshold sent — server uses adaptive logic per sentence
             })
         });
         var data = await res.json();
@@ -389,7 +397,6 @@ function renderRewritten(data) {
     var total     = data.total_sentences || (data.rewritten_sentences || []).length;
     var reduction = origScore - newScore;
 
-    // ── Rich summary stats ─────────────────────────────────────────────
     function setStat(id, val) { if ($(id)) $(id).textContent = val; }
     setStat('stat-orig',      Math.round(origScore) + '%');
     setStat('stat-new',       Math.round(newScore)  + '%');
@@ -397,13 +404,11 @@ function renderRewritten(data) {
     setStat('stat-rewritten', rwCount);
     setStat('stat-total',     total);
 
-    // Colour the reduction value
     var redEl = $('stat-reduction');
     if (redEl) {
         redEl.className = 'stat-value ' + (reduction >= 0 ? 'text-success' : 'text-danger');
     }
 
-    // ── Sentence list ──────────────────────────────────────────────────
     var list = $('rewrite-list');
     if (!list) return;
     list.innerHTML = '';
@@ -476,7 +481,7 @@ async function downloadReport(format) {
     showLoading('Generating ' + format.toUpperCase() + ' report...');
     try {
         var d   = state.rewrittenData || {};
-        var res = await fetch('/report', {
+        var res = await fetch(API_BASE + '/report', {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
@@ -505,7 +510,7 @@ async function downloadRewrittenDoc(format) {
     format = format || 'docx';
     showLoading('Preparing rewritten document (' + format.toUpperCase() + ')...');
     try {
-        var res = await fetch('/download_rewritten', {
+        var res = await fetch(API_BASE + '/download_rewritten', {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
@@ -530,7 +535,6 @@ document.addEventListener('DOMContentLoaded', function () {
 
     initUploadZone();
 
-    // Panel button wiring (both sticky bar and inline)
     function on(id, fn) {
         var el = $(id); if (el) el.addEventListener('click', fn);
     }
@@ -541,8 +545,8 @@ document.addEventListener('DOMContentLoaded', function () {
     on('btn-rewrite',      runRewrite);
     on('bar-btn-rewrite',  runRewrite);
 
-    on('btn-report',       function () { renderReportSummary(); showPanel('report'); activateStep(4); });
-    on('bar-btn-report',   function () { renderReportSummary(); showPanel('report'); activateStep(4); });
+    on('btn-report',     function () { renderReportSummary(); showPanel('report'); activateStep(4); });
+    on('bar-btn-report', function () { renderReportSummary(); showPanel('report'); activateStep(4); });
 
     on('btn-back-upload',     function () { showPanel('upload');   activateStep(1); });
     on('bar-btn-back-upload', function () { showPanel('upload');   activateStep(1); });
@@ -550,12 +554,10 @@ document.addEventListener('DOMContentLoaded', function () {
     on('btn-back-results',     function () { showPanel('results'); activateStep(2); });
     on('bar-btn-back-results', function () { showPanel('results'); activateStep(2); });
 
-    // Download rewritten doc buttons
     on('btn-download-rewritten',     function () { downloadRewrittenDoc('docx'); });
     on('bar-btn-download-rewritten', function () { downloadRewrittenDoc('docx'); });
     on('btn-download-rewritten-txt', function () { downloadRewrittenDoc('txt'); });
 
-    // Start on upload panel
     showPanel('upload');
     activateStep(1);
 });
