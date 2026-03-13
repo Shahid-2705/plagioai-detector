@@ -1,98 +1,309 @@
 # PlagioAI — AI Plagiarism Detector & Rewriter
 
-A production-ready web application that detects plagiarism in uploaded documents
-and rewrites flagged sentences using AI.
+PlagioAI is a full-stack AI web application that detects plagiarism in documents and rewrites flagged sentences using modern NLP models.
+
+The system analyzes uploaded content using semantic similarity and statistical overlap metrics, then automatically paraphrases high-similarity sentences using a transformer-based language model.
 
 ---
 
-## Quick Start
+# Features
 
-### 1. Install dependencies
+* Upload **PDF, DOCX, or TXT** files
+* Paste raw text directly for analysis
+* Multi-metric plagiarism detection
+* AI-powered sentence rewriting
+* Interactive results visualization
+* Downloadable plagiarism reports
+* Export fully rewritten documents
+* GPU acceleration support
+* Modern responsive UI
 
-```bash
-cd plagiarism_ai_web
+---
+
+# Live Architecture
+
+The application is deployed using a modern cloud stack.
+
+Frontend
+Powered by **Vercel**
+
+Backend API
+Powered by **Render**
+
+Database & Storage
+Powered by **Supabase**
+
+```
+User
+ ↓
+Vercel (Frontend UI)
+ ↓
+Render (Flask AI API)
+ ↓
+Supabase (Database & Storage)
+```
+
+---
+
+# Workflow
+
+```
+Upload Document
+      ↓
+Detect Plagiarism
+      ↓
+Rewrite Flagged Sentences
+      ↓
+Generate Report
+```
+
+### 1 Upload
+
+Users can upload files or paste text directly.
+
+Supported formats
+
+* PDF
+* DOCX
+* TXT
+
+Maximum size
+
+```
+16 MB
+```
+
+---
+
+### 2 Detect
+
+Each sentence is analyzed using three metrics.
+
+**Semantic Similarity**
+
+```
+SentenceTransformer model
+all-MiniLM-L6-v2
+```
+
+**N-gram Overlap**
+
+```
+Bigram + Trigram Dice coefficient
+```
+
+**Jaccard Similarity**
+
+```
+Word overlap index
+```
+
+Final plagiarism score
+
+```
+Combined Score =
+0.5 × Semantic
++ 0.3 × N-gram
++ 0.2 × Jaccard
+```
+
+---
+
+### 3 Rewrite
+
+Sentences exceeding the plagiarism threshold are automatically paraphrased using
+
+```
+google/flan-t5-base
+```
+
+Adaptive rewriting threshold
+
+```
+< 8 words  → 40%
+8-20 words → 55%
+> 20 words → 70%
+```
+
+This prevents unnecessary rewriting of short technical phrases.
+
+---
+
+### 4 Report
+
+Users can export results as
+
+```
+PDF report
+DOCX report
+Full rewritten document
+```
+
+Reports include
+
+* Original plagiarism score
+* New plagiarism score
+* Sentence-level analysis
+* Rewritten sentences
+* Overall improvement summary
+
+---
+
+# Project Structure
+
+```
+plagiarism_ai_web
+│
+├── app.py
+├── requirements.txt
+├── render.yaml
+├── vercel.json
+├── README.md
+│
+├── uploads
+│
+├── core
+│   ├── file_parser.py
+│   ├── text_preprocessor.py
+│   ├── similarity_engine.py
+│   ├── plagiarism_detector.py
+│   ├── rewrite_engine.py
+│   └── report_generator.py
+│
+├── templates
+│   ├── index.html
+│   └── checker.html
+│
+└── static
+    ├── css
+    │   └── style.css
+    └── js
+        └── script.js
+```
+
+---
+
+# Local Development
+
+## 1 Install dependencies
+
+```
 pip install -r requirements.txt
 ```
 
-> **GPU acceleration**: if you have an NVIDIA GPU with CUDA, replace the `torch`
-> line in `requirements.txt` with the appropriate CUDA wheel from
-> https://pytorch.org/get-started/locally/
+---
 
-### 2. Download NLTK data (one-time)
+## 2 Download NLTK resources
 
-```python
-python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab'); nltk.download('stopwords')"
+```
+python -c "import nltk; nltk.download('punkt'); nltk.download('stopwords')"
 ```
 
-### 3. Run the server
+---
 
-```bash
+## 3 Run the server
+
+```
 python app.py
 ```
 
-Open your browser at **http://localhost:5000**
-
----
-
-## Workflow
+Open the app in your browser
 
 ```
-Upload File  →  Check Plagiarism  →  Rewrite Content  →  Download Report
-```
-
-1. **Upload** — PDF, DOCX, or TXT (up to 16 MB), or paste text directly.
-2. **Detect** — Each sentence is scored with three metrics:
-   - Semantic similarity (SentenceTransformer `all-MiniLM-L6-v2`)
-   - N-gram overlap (bigram + trigram Dice coefficient)
-   - Jaccard word-overlap index
-   - **Combined score** = 0.5 × semantic + 0.3 × n-gram + 0.2 × Jaccard
-3. **Rewrite** — Sentences scoring ≥ 70% are paraphrased by `google/flan-t5-base`.
-4. **Report** — Export a full report as PDF or DOCX.
-
----
-
-## Project Structure
-
-```
-plagiarism_ai_web/
-├── app.py                    # Flask application & routes
-├── requirements.txt
-├── README.md
-├── uploads/                  # Temporary file storage
-├── core/
-│   ├── file_parser.py        # PDF / DOCX / TXT extraction
-│   ├── text_preprocessor.py  # Cleaning, tokenisation, sentence splitting
-│   ├── similarity_engine.py  # Semantic + n-gram + Jaccard metrics
-│   ├── plagiarism_detector.py# Orchestration & scoring
-│   ├── rewrite_engine.py     # FLAN-T5 paraphrasing
-│   └── report_generator.py   # PDF & DOCX report creation
-├── templates/
-│   ├── index.html            # Landing page
-│   └── checker.html          # Main app (4-step flow)
-└── static/
-    ├── css/style.css
-    └── js/script.js
+http://localhost:5000
 ```
 
 ---
 
-## Configuration
+# GPU Acceleration
 
-| Setting | Default | Notes |
-|---------|---------|-------|
-| Rewrite threshold | 70% | Sentences above this are rewritten |
-| Semantic weight | 0.50 | Adjust in `similarity_engine.py` |
-| N-gram weight | 0.30 | Adjust in `similarity_engine.py` |
-| Jaccard weight | 0.20 | Adjust in `similarity_engine.py` |
-| Model (embedding) | `all-MiniLM-L6-v2` | Can use larger models |
-| Model (rewriting) | `google/flan-t5-base` | Can use `flan-t5-large` for quality |
-| GPU | Auto-detected | Falls back to CPU automatically |
+If CUDA is available, PyTorch automatically runs models on GPU.
+
+To enable CUDA support install the correct PyTorch build
+
+```
+https://pytorch.org/get-started/locally
+```
+
+Example
+
+```
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+```
 
 ---
 
-## Notes
+# Configuration
 
-- The first run will download model weights (~100 MB for MiniLM, ~250 MB for FLAN-T5).
-- GPU acceleration is used automatically when CUDA is available.
-- Large documents (>500 sentences) may take a few minutes on CPU.
-"# plagiarism_detector" 
+| Parameter         | Default          | Location             |
+| ----------------- | ---------------- | -------------------- |
+| Rewrite threshold | 70%              | rewrite_engine.py    |
+| Semantic weight   | 0.50             | similarity_engine.py |
+| N-gram weight     | 0.30             | similarity_engine.py |
+| Jaccard weight    | 0.20             | similarity_engine.py |
+| Embedding model   | all-MiniLM-L6-v2 | similarity_engine.py |
+| Rewrite model     | flan-t5-base     | rewrite_engine.py    |
+
+---
+
+# Performance Notes
+
+First startup downloads AI model weights
+
+```
+Sentence Transformer  ~100MB
+FLAN-T5 model         ~250MB
+```
+
+Initial load time
+
+```
+1–2 minutes
+```
+
+Subsequent runs are significantly faster due to caching.
+
+---
+
+# Deployment
+
+Frontend
+
+```
+Vercel
+```
+
+Backend
+
+```
+Render
+```
+
+Database
+
+```
+Supabase
+```
+
+---
+
+# Future Improvements
+
+* Vector plagiarism detection using embeddings
+* Supabase pgvector semantic search
+* Multi-document plagiarism comparison
+* Real-time collaboration
+* User authentication
+* History of plagiarism reports
+
+---
+
+# License
+
+MIT License
+
+---
+
+# Author
+
+Mohamed Shahid
